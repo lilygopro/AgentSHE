@@ -56,22 +56,23 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 fi
 
 echo "==> GitHub Release $REPO $VERSION"
+upload_args=()
+for a in "${assets[@]}"; do
+  upload_args+=("$DIST/$a")
+done
 if gh release view "$VERSION" -R "$REPO" >/dev/null 2>&1; then
-  gh release upload "$VERSION" -R "$REPO" --clobber "${assets[@]/#/$DIST/}"
+  gh release upload "$VERSION" -R "$REPO" --clobber "${upload_args[@]}"
 else
-  (
-    cd "$DIST"
-    gh release create "$VERSION" -R "$REPO" \
-      --title "AgentSHE $VERSION" \
-      --notes "HelperHost binaries for Connecter (Mac / Windows / Linux).
+  gh release create "$VERSION" -R "$REPO" \
+    --title "AgentSHE $VERSION" \
+    --notes "HelperHost binaries for Connecter (Mac / Windows / Linux).
 
 Download base (stable):
 \`https://github.com/${REPO}/releases/latest/download/\`
 
 Assets:
-$(printf -- '- %s\n' "${assets[@]}")"
-      "${assets[@]}"
-  )
+$(printf -- '- %s\n' "${assets[@]}")" \
+    "${upload_args[@]}"
 fi
 
 echo
