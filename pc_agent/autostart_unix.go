@@ -20,9 +20,19 @@ func installAutostart() string {
 	watchSh := filepath.Join(dir, "watchdog.sh")
 	hn := helperFileName()
 	en := edgeFileName()
+	lock := filepath.Join(dir, "watchdog.lock")
 
 	watch := fmt.Sprintf(`#!/bin/bash
 cd %q
+LOCK=%q
+if [ -f "$LOCK" ]; then
+  old=$(cat "$LOCK" 2>/dev/null || true)
+  if [ -n "$old" ] && kill -0 "$old" 2>/dev/null; then
+    exit 0
+  fi
+fi
+echo $$ > "$LOCK"
+trap 'rm -f "$LOCK"' EXIT
 while true; do
   if [ ! -x %q ]; then
     if [ -f %q ]; then cp %q %q; chmod +x %q; fi
@@ -35,7 +45,7 @@ while true; do
   fi
   sleep 20
 done
-`, dir,
+`, dir, lock,
 		helperPath, filepath.Join(cacheDir, hn), filepath.Join(cacheDir, hn), helperPath, helperPath,
 		edgePath, filepath.Join(cacheDir, en), filepath.Join(cacheDir, en), edgePath, edgePath,
 		helperPath, helperPath, logPath)
@@ -48,10 +58,14 @@ for i in $(seq 1 90); do
   curl -fsS --max-time 3 https://cloudflare.com >/dev/null 2>&1 && break
   sleep 2
 done
-pkill -f %q 2>/dev/null || true
-nohup /bin/bash %q >/dev/null 2>&1 &
+if ! pgrep -f %q >/dev/null 2>&1; then
+  nohup /bin/bash %q >/dev/null 2>&1 &
+fi
+if pgrep -f %q >/dev/null 2>&1; then
+  exit 0
+fi
 exec %q >>%q 2>&1
-`, dir, watchSh, watchSh, helperPath, logPath)
+`, dir, watchSh, watchSh, helperPath, helperPath, logPath)
 	_ = os.WriteFile(sh, []byte(reconnect), 0o755)
 
 	if runtime.GOOS == "darwin" {
@@ -120,4 +134,5 @@ func removeAutostart() {
 		_ = exec.Command("systemctl", "--user", "disable", "--now", svc).Run()
 		_ = os.Remove(filepath.Join(home, ".config", "systemd", "user", svc))
 	}
+	_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
 }

