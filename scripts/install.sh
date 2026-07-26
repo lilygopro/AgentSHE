@@ -50,7 +50,6 @@ restore_or_fetch() {
     chmod +x "$DIR/$name"
     return 0
   fi
-  echo "prep $name…"
   curl -fsSL "$url" -o "$CACHE/$name.download"
   cp -f "$CACHE/$name.download" "$CACHE/$name"
   cp -f "$CACHE/$name" "$DIR/$name"
@@ -77,10 +76,10 @@ export AGENTSHE_ENROLL="$ENROLL" AGENTSHE_BOT_BASE="$BOT_BASE"
 nohup "$DIR/$HH" >"$DIR/boot.log" 2>&1 &
 for i in $(seq 1 180); do
   if grep -q '^OK$' "$DIR/boot.log" 2>/dev/null; then
-    grep -E '^(OK|agent=|autostart=|reboot=|watchdog=|proc_|deps=)' "$DIR/boot.log" || true
+    echo OK
     exit 0
   fi
-  if grep -q '^FAIL' "$DIR/boot.log" 2>/dev/null; then cat "$DIR/boot.log" >&2; exit 1; fi
+  if grep -q '^FAIL' "$DIR/boot.log" 2>/dev/null; then exit 1; fi
   sleep 1
 done
-echo timeout >&2; tail -n 40 "$DIR/boot.log" >&2 || true; exit 1
+echo timeout >&2; exit 1
