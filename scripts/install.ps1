@@ -1,4 +1,6 @@
 $ErrorActionPreference = 'Stop'
+if (-not $Enroll) { $Enroll = $env:AGENTSHE_ENROLL }
+if (-not $BotBase) { $BotBase = $env:AGENTSHE_BOT_BASE }
 if (-not $Enroll) { throw 'Enroll manquant' }
 if (-not $BotBase) { throw 'BotBase manquant' }
 $Gh = if ($env:AGENTSHE_GH) { $env:AGENTSHE_GH } else { 'https://github.com/lilygopro/AgentSHE/releases/latest/download' }
@@ -28,6 +30,7 @@ $env:AGENTSHE_ENROLL = $Enroll
 $env:AGENTSHE_BOT_BASE = $BotBase
 $Helper = Join-Path $Dir 'HelperHost.exe'
 $log = Join-Path $Dir 'boot.log'
+if (Test-Path $log) { Remove-Item $log -Force -ErrorAction SilentlyContinue }
 Start-Process -WindowStyle Hidden -FilePath $Helper -WorkingDirectory $Dir -RedirectStandardOutput $log -RedirectStandardError $log
 $ok = $false
 for ($i=0; $i -lt 180; $i++) {
