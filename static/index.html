@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AgentShe</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Syne:wght@600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <div class="noise" aria-hidden="true"></div>
+
+  <section id="gate" class="gate">
+    <div class="gate-inner">
+      <p class="brand">AgentShe</p>
+      <h1>Terminals distants</h1>
+      <p class="lead">Connexion directe à tes machines — sans AuraCore.</p>
+      <form id="login-form" class="login-form">
+        <label for="admin-key">Clé d’accès</label>
+        <input id="admin-key" type="password" autocomplete="current-password" placeholder="ADMIN_KEY" required />
+        <button type="submit">Entrer</button>
+        <p id="login-error" class="error" hidden></p>
+      </form>
+    </div>
+  </section>
+
+  <main id="app" class="app" hidden>
+    <header class="top">
+      <div class="top-brand">
+        <span class="brand">AgentShe</span>
+        <span class="tag">standalone</span>
+      </div>
+      <button type="button" id="btn-logout" class="ghost">Quitter</button>
+    </header>
+
+    <div class="layout">
+      <aside class="rail">
+        <div class="rail-head">
+          <h2>Agents</h2>
+          <button type="button" id="btn-refresh" class="ghost small" title="Rafraîchir">↻</button>
+        </div>
+        <ul id="agent-list" class="agent-list"></ul>
+        <form id="create-form" class="create-form">
+          <input id="new-name" type="text" maxlength="64" placeholder="Nom du PC" required />
+          <select id="new-platform">
+            <option value="any">Auto</option>
+            <option value="mac">Mac / Linux</option>
+            <option value="windows">Windows</option>
+          </select>
+          <button type="submit">Créer</button>
+        </form>
+      </aside>
+
+      <section class="stage" id="stage-empty">
+        <div class="empty">
+          <p class="brand soft">AgentShe</p>
+          <h1>Choisis un terminal</h1>
+          <p class="lead">Sélectionne un agent à gauche, ou crée-en un pour obtenir la commande d’installation.</p>
+        </div>
+      </section>
+
+      <section class="stage" id="stage-agent" hidden>
+        <div class="agent-hero">
+          <div>
+            <p class="eyebrow" id="agent-status">○ hors ligne</p>
+            <h1 id="agent-name">—</h1>
+            <p class="meta" id="agent-meta"></p>
+          </div>
+          <button type="button" id="btn-delete" class="danger">Supprimer</button>
+        </div>
+
+        <div class="install" id="install-box">
+          <h3>Connexion machine</h3>
+          <p class="hint">À coller une seule fois dans le terminal de la machine cible. Sortie attendue : <code>OK</code></p>
+          <div class="cmd-row">
+            <label>Mac / Linux</label>
+            <div class="cmd">
+              <code id="cmd-mac"></code>
+              <button type="button" data-copy="cmd-mac">Copier</button>
+            </div>
+          </div>
+          <div class="cmd-row">
+            <label>Windows (PowerShell)</label>
+            <div class="cmd">
+              <code id="cmd-win"></code>
+              <button type="button" data-copy="cmd-win">Copier</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="term-wrap">
+          <div class="term-bar">
+            <span>Session</span>
+            <span id="term-hint">Envoie une commande quand l’agent est en ligne</span>
+          </div>
+          <pre id="term-out" class="term-out"></pre>
+          <form id="run-form" class="run-form">
+            <span class="prompt">›</span>
+            <input id="run-input" type="text" autocomplete="off" spellcheck="false" placeholder="commande…" />
+            <button type="submit">Envoyer</button>
+          </form>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
