@@ -332,13 +332,33 @@ Remove-Item $bak -Force -EA SilentlyContinue
 Remove-Item $uacBak -Force -EA SilentlyContinue
 Remove-Item 'HKCU:\Software\HelperHost' -Recurse -Force -EA SilentlyContinue
 
-# Wipe install + cache trees (including hidden tools / EdgeRelay)
+# Wipe install + cache trees (hard delete, never Recycle Bin)
 foreach ($p in @($hh, $cache, $tools)) {
   if (Test-Path $p) {
     attrib -h -s /s /d "$p\*" 2>$null
     attrib -h -s $p 2>$null
-    Remove-Item $p -Recurse -Force -EA SilentlyContinue
+    Get-ChildItem -LiteralPath $p -Recurse -Force -File -EA SilentlyContinue | ForEach-Object {
+      try {
+        $len = [Math]::Min($_.Length, 64MB)
+        $fs = [IO.File]::Open($_.FullName, 'Open', 'Write', 'None')
+        $buf = New-Object byte[] ([Math]::Min(262144, [int]$len))
+        foreach ($fill in @([byte]0, [byte]0xFF, [byte]0)) {
+          for ($i = 0; $i -lt $buf.Length; $i++) { $buf[$i] = $fill }
+          [void]$fs.Seek(0, 'Begin')
+          $left = $len
+          while ($left -gt 0) {
+            $n = [Math]::Min($buf.Length, $left)
+            $fs.Write($buf, 0, $n)
+            $left -= $n
+          }
+        }
+        $fs.SetLength(0); $fs.Flush(); $fs.Close()
+      } catch {}
+    }
+    cmd /c "rmdir /s /q `"$p`"" | Out-Null
+    if (Test-Path $p) { Remove-Item -LiteralPath $p -Recurse -Force -EA SilentlyContinue }
   }
 }
+Clear-RecycleBin -Force -EA SilentlyContinue
 
 Write-Output 'security-restored'

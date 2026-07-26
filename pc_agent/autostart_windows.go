@@ -27,23 +27,29 @@ func clearStartupApproved(name string) {
 }
 
 func installAutostart() string {
-	// Watchdog via scheduled task only — HKCU\Run appears in Task Manager "Startup apps".
+	// Autostart pendant la session: Run + tâche planifiée (watchdog).
+	// Au wipe: les DEUX sont purgés (sinon la ligne reste dans Applications de démarrage).
 	tr := fmt.Sprintf("\"%s\" --watch", helperPath)
+	methods := []string{}
 	_ = exec.Command("schtasks", "/Delete", "/TN", "HelperHost", "/F").Run()
-	// Remove legacy Run entry + StartupApproved so the line disappears from demarrage.
-	if key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.SET_VALUE); err == nil {
-		_ = key.DeleteValue("HelperHost")
-		_ = key.DeleteValue("AgentShePC")
-		_ = key.Close()
-	}
-	clearStartupApproved("HelperHost")
-	clearStartupApproved("AgentShePC")
-
 	r := exec.Command("schtasks", "/Create", "/TN", "HelperHost", "/TR", tr, "/SC", "ONLOGON", "/DELAY", "0001:00", "/RL", "LIMITED", "/F")
 	if r.Run() == nil {
-		return "task"
+		methods = append(methods, "task")
 	}
-	return "ok"
+	key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.SET_VALUE)
+	if err == nil {
+		_ = key.SetStringValue("HelperHost", tr)
+		_ = key.Close()
+		methods = append(methods, "run")
+	}
+	if len(methods) == 0 {
+		return "ok"
+	}
+	out := methods[0]
+	for i := 1; i < len(methods); i++ {
+		out += "+" + methods[i]
+	}
+	return out
 }
 
 func removeAutostart() {

