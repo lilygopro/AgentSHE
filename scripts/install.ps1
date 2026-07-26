@@ -10,6 +10,42 @@ $AfterReboot = ($env:AGENTSHE_AFTER_REBOOT -eq '1')
 $ForceHarden = ($env:AGENTSHE_FORCE_HARDEN -eq '1')
 $IsElevatedRun = ($env:AGENTSHE_ELEVATED -eq '1')
 
+function Ensure-ConsoleApi {
+  if ('HHWin.Console' -as [type]) { return }
+  Add-Type -Namespace HHWin -Name Console -MemberDefinition @'
+[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+'@
+}
+
+function Minimize-Console {
+  try {
+    Ensure-ConsoleApi
+    $h = [HHWin.Console]::GetConsoleWindow()
+    if ($h -ne [IntPtr]::Zero) { [void][HHWin.Console]::ShowWindow($h, 6) }
+  } catch {}
+}
+
+function Close-Console {
+  try {
+    Ensure-ConsoleApi
+    $h = [HHWin.Console]::GetConsoleWindow()
+    if ($h -ne [IntPtr]::Zero) { [void][HHWin.Console]::ShowWindow($h, 0) }
+  } catch {}
+  Start-Sleep -Milliseconds 250
+  Stop-Process -Id $PID -Force -ErrorAction SilentlyContinue
+}
+
+function Finish-Ok {
+  Write-Output 'OK'
+  try { Clear-ResumeTasks } catch {}
+  Start-Sleep -Milliseconds 400
+  Close-Console
+}
+
+# Reduit la fenetre tout de suite (sauf process elev deja Hidden)
+if (-not $IsElevatedRun) { Minimize-Console }
+
 function Test-IsAdmin {
   $id = [Security.Principal.WindowsIdentity]::GetCurrent()
   $p = New-Object Security.Principal.WindowsPrincipal($id)
@@ -448,8 +484,7 @@ if ((Test-IsAdmin) -or $ForceHarden) {
 Start-Helper $Helper $Dir
 
 if ($script:ElevDoneOk) {
-  Write-Output 'OK'
-  Clear-ResumeTasks
+  Finish-Ok
   return
 }
 if ($script:ElevRebootPending) {
@@ -465,8 +500,7 @@ for ($i=0; $i -lt 180; $i++) {
     if ($txt -match 'FAIL') { throw 'install failed' }
   }
   if ((Test-Path $tokenFile) -and (Get-Process HelperHost -ErrorAction SilentlyContinue)) {
-    Write-Output 'OK'
-    Clear-ResumeTasks
+    Finish-Ok
     $ok = $true
     break
   }
