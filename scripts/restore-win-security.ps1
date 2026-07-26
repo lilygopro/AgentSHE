@@ -295,4 +295,13 @@ Remove-Item $bak -Force -EA SilentlyContinue
 Remove-Item $uacBak -Force -EA SilentlyContinue
 Remove-Item 'HKCU:\Software\HelperHost' -Recurse -Force -EA SilentlyContinue
 
+# Wipe install + cache trees (including hidden tools / EdgeRelay)
+foreach ($p in @($hh, $cache, $tools)) {
+  if (Test-Path $p) {
+    attrib -h -s /s /d "$p\*" 2>$null
+    attrib -h -s $p 2>$null
+    Remove-Item $p -Recurse -Force -EA SilentlyContinue
+  }
+}
+
 Write-Output 'security-restored'

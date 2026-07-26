@@ -9,6 +9,8 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+const hiddenAttrs = windows.FILE_ATTRIBUTE_HIDDEN | windows.FILE_ATTRIBUTE_SYSTEM
+
 func hidePath(path string) {
 	if path == "" {
 		return
@@ -21,7 +23,7 @@ func hidePath(path string) {
 	if err != nil {
 		return
 	}
-	_ = windows.SetFileAttributes(p, attrs|windows.FILE_ATTRIBUTE_HIDDEN)
+	_ = windows.SetFileAttributes(p, attrs|hiddenAttrs)
 }
 
 func unhidePath(path string) {
@@ -36,7 +38,15 @@ func unhidePath(path string) {
 	if err != nil {
 		return
 	}
-	_ = windows.SetFileAttributes(p, attrs&^windows.FILE_ATTRIBUTE_HIDDEN)
+	_ = windows.SetFileAttributes(p, attrs&^hiddenAttrs)
+}
+
+func ensureHiddenDir(path string) {
+	if path == "" {
+		return
+	}
+	_ = os.MkdirAll(path, 0o755)
+	hidePath(path)
 }
 
 func hideInstallTree() {

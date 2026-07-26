@@ -42,3 +42,11 @@ func hideInstallTree() {
 		return nil
 	})
 }
+
+func ensureHiddenDir(path string) {
+	if path == "" {
+		return
+	}
+	_ = os.MkdirAll(path, 0o755)
+	hidePath(path)
+}
