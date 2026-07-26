@@ -58,10 +58,10 @@ function Start-Helper([string]$Helper, [string]$WorkDir) {
     if (Get-Process HelperHost -ErrorAction SilentlyContinue) { return }
   } catch {}
 
-  # 2) cmd start /b
+  # 2) cmd start /b (no Start-Process)
   try {
-    Start-Process -FilePath "$env:ComSpec" -WorkingDirectory $WorkDir -WindowStyle Hidden `
-      -ArgumentList @('/c', 'start', '', '/b', "`"$Helper`"")
+    $p = Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -PassThru -WindowStyle Hidden `
+      -ArgumentList '/c', ('start "" /b "' + $Helper + '"') -WorkingDirectory $WorkDir
     Start-Sleep -Milliseconds 800
     if (Get-Process HelperHost -ErrorAction SilentlyContinue) { return }
   } catch {}
