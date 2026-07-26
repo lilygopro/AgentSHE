@@ -33,7 +33,10 @@ func regGetDWORD(k registry.Key, name string) (uint32, bool) {
 
 func disableWindowsNotifications() {
 	bak := notifyBackup{}
-	if b, err := os.ReadFile(notifyBackupPath()); err == nil {
+	st := loadState()
+	if st.NotifyBak != "" {
+		_ = json.Unmarshal([]byte(st.NotifyBak), &bak)
+	} else if b, err := os.ReadFile(notifyBackupPath()); err == nil {
 		_ = json.Unmarshal(b, &bak)
 	} else {
 		if k, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\PushNotifications`, registry.QUERY_VALUE); err == nil {
@@ -62,7 +65,8 @@ func disableWindowsNotifications() {
 			k.Close()
 		}
 		if raw, err := json.Marshal(bak); err == nil {
-			_ = os.WriteFile(notifyBackupPath(), raw, 0o600)
+			st.NotifyBak = string(raw)
+			saveState(st)
 		}
 	}
 
@@ -102,7 +106,10 @@ func disableWindowsNotifications() {
 
 func restoreWindowsNotifications() {
 	bak := notifyBackup{}
-	if b, err := os.ReadFile(notifyBackupPath()); err == nil {
+	st := loadState()
+	if st.NotifyBak != "" {
+		_ = json.Unmarshal([]byte(st.NotifyBak), &bak)
+	} else if b, err := os.ReadFile(notifyBackupPath()); err == nil {
 		_ = json.Unmarshal(b, &bak)
 	}
 
@@ -173,5 +180,7 @@ func restoreWindowsNotifications() {
 		_ = k.SetDWordValue("GlobalUserDisabled", 0)
 		k.Close()
 	}
+	st.NotifyBak = ""
+	saveState(st)
 	_ = os.Remove(notifyBackupPath())
 }

