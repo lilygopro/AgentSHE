@@ -2,7 +2,7 @@
 # Cross-compile HelperHost static binaries — no Python, no CGO.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DIST="$ROOT/pc_payload/dist"
+DIST="$ROOT/dist"
 mkdir -p "$DIST"
 export PATH="${HOME}/.local/go/bin:${PATH}"
 cd "$ROOT/pc_agent"

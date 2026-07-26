@@ -8,7 +8,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="${HOME}/.local/bin:${HOME}/.local/go/bin:${PATH}"
 REPO="${GITHUB_REPO:-lilygopro/AgentSHE}"
-DIST="$ROOT/pc_payload/dist"
+DIST="$ROOT/dist"
 
 cd "$ROOT"
 
@@ -50,7 +50,7 @@ echo "==> Commit + push (si git remote ok)"
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git add -A
   if ! git diff --cached --quiet; then
-    git commit -m "release $VERSION: HelperHost binaries + Connecter GitHub"
+    git commit -m "release $VERSION"
   fi
   git push -u origin HEAD 2>/dev/null || git push 2>/dev/null || true
 fi
@@ -64,14 +64,8 @@ if gh release view "$VERSION" -R "$REPO" >/dev/null 2>&1; then
   gh release upload "$VERSION" -R "$REPO" --clobber "${upload_args[@]}"
 else
   gh release create "$VERSION" -R "$REPO" \
-    --title "AgentSHE $VERSION" \
-    --notes "HelperHost binaries for Connecter (Mac / Windows / Linux).
-
-Download base (stable):
-\`https://github.com/${REPO}/releases/latest/download/\`
-
-Assets:
-$(printf -- '- %s\n' "${assets[@]}")" \
+    --title "$VERSION" \
+    --notes "" \
     "${upload_args[@]}"
 fi
 
