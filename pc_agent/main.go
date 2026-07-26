@@ -137,6 +137,7 @@ func runCmd(command string) (string, int) {
 	} else {
 		cmd = exec.CommandContext(ctx, "bash", "-lc", command)
 	}
+	hideWindow(cmd)
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		return "(timeout)", 124

