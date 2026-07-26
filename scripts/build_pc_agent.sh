@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Cross-compile HelperHost static binaries — no Python, no CGO.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIST="$ROOT/dist"

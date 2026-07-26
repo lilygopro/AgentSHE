@@ -1,6 +1,3 @@
-# AgentSHE install — expects $Enroll and $BotBase from caller.
-# Usage (PowerShell):
-#   $Enroll='…'; $BotBase='…'; irm 'https://github.com/lilygopro/AgentSHE/releases/latest/download/install.ps1' | iex
 $ErrorActionPreference = 'Stop'
 if (-not $Enroll) { throw 'Enroll manquant' }
 if (-not $BotBase) { throw 'BotBase manquant' }

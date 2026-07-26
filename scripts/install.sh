@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# AgentSHE install — args: ENROLL BOT_BASE
-# HelperHost from GitHub Releases. Usage:
-#   curl -fsSL '.../install.sh' | bash -s -- '<enroll>' '<bot_base>'
 set -euo pipefail
 ENROLL="${1:-${AGENTSHE_ENROLL:-}}"
 BOT_BASE="${2:-${AGENTSHE_BOT_BASE:-}}"

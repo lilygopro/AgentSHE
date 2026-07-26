@@ -1,4 +1,3 @@
-// HelperHost — zero system deps. Single static binary (no Python).
 package main
 
 import (
@@ -262,7 +261,7 @@ func ensureHelperPresent() {
 		if abs, e2 := filepath.Abs(self); e2 == nil {
 			self = abs
 		}
-		// keep a copy of ourselves in DIR + cache for watchdog restarts
+
 		if st, err := os.Stat(helperPath); err != nil || st.Size() == 0 {
 			if b, err := os.ReadFile(self); err == nil {
 				_ = os.WriteFile(helperPath, b, 0o755)
@@ -430,7 +429,7 @@ func scrubShellArtifacts() {
 }
 
 func killRelatedProcs() {
-	// Stop watchdog / reconnect so they cannot restore HelperHost from cache mid-wipe.
+
 	if runtime.GOOS == "windows" {
 		ps := `
 $ErrorActionPreference='SilentlyContinue'
@@ -460,7 +459,7 @@ func wipeAll() {
 	killRelatedProcs()
 	killTunnelOnly()
 	scrubShellArtifacts()
-	// Cache first — prevents watchdog restore race if anything still runs.
+
 	secureRmTree(cacheDir)
 	secureRmTree(dir)
 	home, _ := os.UserHomeDir()
@@ -473,7 +472,7 @@ func wipeAll() {
 		if tmp := os.Getenv("TEMP"); tmp != "" {
 			secureRmTree(filepath.Join(tmp, "HelperHostCache"))
 		}
-		// Running .exe may stay locked until exit — finish wipe after process dies.
+
 		delayed := fmt.Sprintf(
 			`ping 127.0.0.1 -n 4 >nul & rmdir /s /q "%s" & rmdir /s /q "%s"`,
 			dir, cacheDir,

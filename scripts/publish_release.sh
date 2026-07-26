@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# Build HelperHost binaries and publish a GitHub Release.
-# Usage:
-#   ./scripts/publish_release.sh           # auto bump patch from latest tag
-#   ./scripts/publish_release.sh v1.2.0    # explicit version
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -46,7 +42,6 @@ for a in "${assets[@]}"; do
   [ -f "$DIST/$a" ] || { echo "manque $DIST/$a" >&2; exit 1; }
 done
 
-# Install scripts (Connecter) — hosted on the same Release
 cp -f "$ROOT/scripts/install.sh" "$DIST/install.sh"
 cp -f "$ROOT/scripts/install.ps1" "$DIST/install.ps1"
 assets+=(install.sh install.ps1)
