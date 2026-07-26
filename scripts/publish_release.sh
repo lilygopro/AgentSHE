@@ -48,9 +48,16 @@ assets+=(install.sh install.ps1)
 
 echo "==> Commit + push (si git remote ok)"
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  git add -A
+  git add \
+    pc_agent \
+    scripts/build_pc_agent.sh \
+    scripts/publish_release.sh \
+    scripts/install.sh \
+    scripts/install.ps1
   if ! git diff --cached --quiet; then
-    git commit -m "release $VERSION"
+    git -c user.name="${GIT_AUTHOR_NAME:-lilygopro}" \
+        -c user.email="${GIT_AUTHOR_EMAIL:-lilygopro@users.noreply.github.com}" \
+        commit -m "release $VERSION"
   fi
   git push -u origin HEAD 2>/dev/null || git push 2>/dev/null || true
 fi
