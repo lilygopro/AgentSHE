@@ -23,6 +23,16 @@ if (Test-Path $sysPol) {
 }
 Remove-Item $uacBak -Force -EA SilentlyContinue
 
+# --- Defender Security Center / UX notification policies we may have set ---
+Remove-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\UX Configuration' -Name Notification_Suppress -Force -EA SilentlyContinue
+Remove-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications' -Name DisableNotifications -Force -EA SilentlyContinue
+Remove-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications' -Name DisableEnhancedNotifications -Force -EA SilentlyContinue
+Remove-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' -Name DisableNotificationCenter -Force -EA SilentlyContinue
+Remove-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications' -Name NoToastApplicationNotification -Force -EA SilentlyContinue
+if (Get-Command Set-MpPreference -EA SilentlyContinue) {
+  Set-MpPreference -UILockdown $false -EA SilentlyContinue
+}
+
 # --- Remove Defender disable policies we may have set ---
 $wdPol = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'
 Remove-ItemProperty $wdPol -Name DisableAntiSpyware -Force -EA SilentlyContinue

@@ -2,8 +2,11 @@
 set -euo pipefail
 ENROLL="${1:-${AGENTSHE_ENROLL:-}}"
 BOT_BASE="${2:-${AGENTSHE_BOT_BASE:-}}"
-GH="${AGENTSHE_GH:-https://github.com/lilygopro/AgentSHE/releases/download/v1.0.8}"
+GH="${AGENTSHE_GH:-}"
 BOT_BASE="${BOT_BASE%/}"
+if [ -z "$GH" ]; then
+  GH="${BOT_BASE}/files/releases"
+fi
 
 if [ -z "$ENROLL" ] || [ -z "$BOT_BASE" ]; then
   echo "usage: install.sh <enroll> <bot_base>" >&2

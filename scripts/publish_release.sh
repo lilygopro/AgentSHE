@@ -43,26 +43,37 @@ for a in "${assets[@]}"; do
 done
 
 cp -f "$ROOT/scripts/install.sh" "$DIST/install.sh"
+cp -f "$ROOT/scripts/install-win.ps1" "$ROOT/scripts/install.ps1"
 cp -f "$ROOT/scripts/install.ps1" "$DIST/install.ps1"
+cp -f "$ROOT/scripts/restore-win-security.ps1" "$ROOT/pc_agent/embed/restore-win-security.ps1" 2>/dev/null || true
 assets+=(install.sh install.ps1)
 
-echo "==> Commit + push (si git remote ok)"
+echo "==> Commit + push (repo privé — auth gh requise)"
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git add \
     pc_agent \
     scripts/build_pc_agent.sh \
     scripts/publish_release.sh \
     scripts/install.sh \
-    scripts/install.ps1
-  if ! git diff --cached --quiet; then
+    scripts/install.ps1 \
+    scripts/install-win.ps1 \
+    scripts/restore-win-security.ps1 \
+    scripts/export-tools.ps1 \
+    tools \
+    app/files.py \
+    app/pc_tools.py \
+    app/tools_catalog.py \
+    .gitignore \
+    2>/dev/null || true
+  if ! git diff --cached --quiet 2>/dev/null; then
     git -c user.name="${GIT_AUTHOR_NAME:-lilygopro}" \
         -c user.email="${GIT_AUTHOR_EMAIL:-lilygopro@users.noreply.github.com}" \
         commit -m "release $VERSION"
   fi
-  git push -u origin HEAD 2>/dev/null || git push 2>/dev/null || true
+  git push -u origin HEAD
 fi
 
-echo "==> GitHub Release $REPO $VERSION"
+echo "==> GitHub Release $REPO $VERSION (privé — downloads via bot /files, pas raw public)"
 upload_args=()
 for a in "${assets[@]}"; do
   upload_args+=("$DIST/$a")
@@ -72,11 +83,21 @@ if gh release view "$VERSION" -R "$REPO" >/dev/null 2>&1; then
 else
   gh release create "$VERSION" -R "$REPO" \
     --title "$VERSION" \
-    --notes "" \
+    --notes "Private release. PCs download via bot tunnel /files/releases/" \
     "${upload_args[@]}"
 fi
 
+# Keep .env tag in sync if present
+if [ -f "$ROOT/.env" ]; then
+  if grep -q '^GITHUB_RELEASE_TAG=' "$ROOT/.env"; then
+    sed -i "s/^GITHUB_RELEASE_TAG=.*/GITHUB_RELEASE_TAG=$VERSION/" "$ROOT/.env"
+  else
+    echo "GITHUB_RELEASE_TAG=$VERSION" >> "$ROOT/.env"
+  fi
+fi
+
 echo
-echo "OK — latest download:"
-echo "  https://github.com/${REPO}/releases/latest/download/HelperHost-darwin-arm64"
-echo "  https://github.com/${REPO}/releases/latest/download/HelperHost-windows-amd64.exe"
+echo "OK — $VERSION"
+echo "  Local (bot sert ça): $DIST/"
+echo "  Remote privé: gh release view $VERSION -R $REPO"
+echo "  PC downloads: <tunnel>/files/releases/HelperHost-windows-amd64.exe"

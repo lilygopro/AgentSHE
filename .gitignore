@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+data/
+dist/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+pc_agent/HelperHost*
+*.exe
+!tools/windows/**/*.exe
+.DS_Store
+*.log
+/tmp/

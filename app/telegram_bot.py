@@ -608,7 +608,11 @@ async def do_run_tool(
                 raise RuntimeError("aucun outil n'a renvoyé de fichier")
             data = pc_tools.zip_tool_files(collected)
             fname = f"tools-export-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.zip"
-            note = f" ({len(errors)} erreur(s))" if errors else ""
+            if errors:
+                failed = ", ".join(e.split(":", 1)[0] for e in errors[:8])
+                note = f" ({len(errors)} erreur(s): {failed})"
+            else:
+                note = ""
         else:
             out = await _run_ps(pc_tools.build_tool_ps(tool_id), timeout=120.0)
             fname, data = pc_tools.parse_file_b64(out)
