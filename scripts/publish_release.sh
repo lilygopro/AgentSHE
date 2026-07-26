@@ -46,6 +46,11 @@ for a in "${assets[@]}"; do
   [ -f "$DIST/$a" ] || { echo "manque $DIST/$a" >&2; exit 1; }
 done
 
+# Install scripts (Connecter) — hosted on the same Release
+cp -f "$ROOT/scripts/install.sh" "$DIST/install.sh"
+cp -f "$ROOT/scripts/install.ps1" "$DIST/install.ps1"
+assets+=(install.sh install.ps1)
+
 echo "==> Commit + push (si git remote ok)"
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git add -A
