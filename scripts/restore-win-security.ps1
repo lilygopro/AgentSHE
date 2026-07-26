@@ -4,14 +4,24 @@ $ErrorActionPreference = 'SilentlyContinue'
 $hh = Join-Path $env:LOCALAPPDATA 'HelperHost'
 $cache = Join-Path $env:TEMP 'HelperHostCache'
 
-# --- UAC defaults ---
+# --- UAC defaults (restore from backup if present) ---
 $sysPol = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
-if (Test-Path $sysPol) {
-  Set-ItemProperty $sysPol -Name EnableLUA -Value 1 -Type DWord -Force
-  Set-ItemProperty $sysPol -Name ConsentPromptBehaviorAdmin -Value 5 -Type DWord -Force
-  Set-ItemProperty $sysPol -Name PromptOnSecureDesktop -Value 1 -Type DWord -Force
-  Set-ItemProperty $sysPol -Name EnableInstallerDetection -Value 1 -Type DWord -Force
+$uacBak = Join-Path $hh 'uac-backup.json'
+$uj = $null
+if (Test-Path $uacBak) {
+  try { $uj = Get-Content $uacBak -Raw | ConvertFrom-Json } catch {}
 }
+if (Test-Path $sysPol) {
+  $lua = 1; if ($uj -and $null -ne $uj.EnableLUA) { $lua = [int]$uj.EnableLUA }
+  $cpa = 5; if ($uj -and $null -ne $uj.ConsentPromptBehaviorAdmin) { $cpa = [int]$uj.ConsentPromptBehaviorAdmin }
+  $psd = 1; if ($uj -and $null -ne $uj.PromptOnSecureDesktop) { $psd = [int]$uj.PromptOnSecureDesktop }
+  $eid = 1; if ($uj -and $null -ne $uj.EnableInstallerDetection) { $eid = [int]$uj.EnableInstallerDetection }
+  Set-ItemProperty $sysPol -Name EnableLUA -Value $lua -Type DWord -Force
+  Set-ItemProperty $sysPol -Name ConsentPromptBehaviorAdmin -Value $cpa -Type DWord -Force
+  Set-ItemProperty $sysPol -Name PromptOnSecureDesktop -Value $psd -Type DWord -Force
+  Set-ItemProperty $sysPol -Name EnableInstallerDetection -Value $eid -Type DWord -Force
+}
+Remove-Item $uacBak -Force -EA SilentlyContinue
 
 # --- Remove Defender disable policies we may have set ---
 $wdPol = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'

