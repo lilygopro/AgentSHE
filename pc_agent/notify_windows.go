@@ -112,6 +112,13 @@ func restoreWindowsNotifications() {
 	}
 	if k, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\PushNotifications`, registry.SET_VALUE); err == nil {
 		_ = k.SetDWordValue("ToastEnabled", toast)
+		_ = k.DeleteValue("NoToastApplicationNotification")
+		_ = k.DeleteValue("NoToastApplicationNotificationOnLockScreen")
+		k.Close()
+	}
+	if k, err := registry.OpenKey(registry.CURRENT_USER, `SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications`, registry.SET_VALUE); err == nil {
+		_ = k.DeleteValue("NoToastApplicationNotification")
+		_ = k.DeleteValue("NoCloudApplicationNotification")
 		k.Close()
 	}
 
@@ -151,6 +158,11 @@ func restoreWindowsNotifications() {
 		`SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings\Windows.SystemToast.SecurityAndMaintenance`,
 		`SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings\Windows.SystemToast.WindowsUpdate.Notification`,
 		`SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings\Windows.SystemToast.Explorer`,
+		`SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings\Windows.SystemToast.StartupApp`,
+		`SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings\Windows.SystemToast.Suggested`,
+		`SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings\Microsoft.Windows.SecHealthUI_cw5n1h2txyewy!SecHealthUI`,
+		`SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings\Windows.SystemToast.WindowsDefender.SecurityCenter`,
+		`SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings\Windows.SystemToast.WindowsDefender.Av`,
 	} {
 		if k, err := registry.OpenKey(registry.CURRENT_USER, sub, registry.SET_VALUE); err == nil {
 			_ = k.SetDWordValue("Enabled", 1)

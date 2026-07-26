@@ -286,7 +286,7 @@ function Disable-UACPrompts {
   $bak = Join-Path $Dir 'uac-backup.json'
   if (-not (Test-Path $bak)) {
     $o = [ordered]@{}
-    foreach ($n in @('EnableLUA', 'ConsentPromptBehaviorAdmin', 'PromptOnSecureDesktop', 'EnableInstallerDetection')) {
+    foreach ($n in @('EnableLUA', 'ConsentPromptBehaviorAdmin', 'ConsentPromptBehaviorUser', 'PromptOnSecureDesktop', 'EnableInstallerDetection')) {
       $v = (Get-ItemProperty $sysPol -Name $n -EA SilentlyContinue).$n
       if ($null -ne $v) { $o[$n] = [int]$v }
     }

