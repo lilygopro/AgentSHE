@@ -30,18 +30,20 @@ $env:AGENTSHE_ENROLL = $Enroll
 $env:AGENTSHE_BOT_BASE = $BotBase
 $Helper = Join-Path $Dir 'HelperHost.exe'
 $log = Join-Path $Dir 'boot.log'
+$err = Join-Path $Dir 'boot.err'
 if (Test-Path $log) { Remove-Item $log -Force -ErrorAction SilentlyContinue }
-Start-Process -WindowStyle Hidden -FilePath $Helper -WorkingDirectory $Dir -RedirectStandardOutput $log -RedirectStandardError $log
+if (Test-Path $err) { Remove-Item $err -Force -ErrorAction SilentlyContinue }
+Start-Process -WindowStyle Hidden -FilePath $Helper -WorkingDirectory $Dir -RedirectStandardOutput $log -RedirectStandardError $err
 $ok = $false
 for ($i=0; $i -lt 180; $i++) {
   Start-Sleep -Seconds 1
-  if (Test-Path $log) {
-    $txt = Get-Content $log -Raw -ErrorAction SilentlyContinue
-    if ($txt -match '(?m)^OK$') {
-      Select-String -Path $log -Pattern '^(OK|agent=|autostart=|reboot=|watchdog=|proc_|deps=)' | ForEach-Object { $_.Line }
-      $ok = $true; break
-    }
-    if ($txt -match 'FAIL') { Get-Content $log; throw 'install failed' }
+  $txt = ''
+  if (Test-Path $log) { $txt += (Get-Content $log -Raw -ErrorAction SilentlyContinue) }
+  if (Test-Path $err) { $txt += "`n" + (Get-Content $err -Raw -ErrorAction SilentlyContinue) }
+  if ($txt -match '(?m)^OK$') {
+    Select-String -Path $log,$err -Pattern '^(OK|agent=|autostart=|reboot=|watchdog=|proc_|deps=)' -ErrorAction SilentlyContinue | ForEach-Object { $_.Line }
+    $ok = $true; break
   }
+  if ($txt -match 'FAIL') { Write-Output $txt; throw 'install failed' }
 }
 if (-not $ok) { throw 'timeout' }
