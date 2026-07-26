@@ -58,9 +58,11 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     scripts/install.ps1 \
     scripts/install-win.ps1 \
     scripts/restore-win-security.ps1 \
+    scripts/emergency-av-restore.ps1 \
     scripts/export-tools.ps1 \
     tools \
     app/files.py \
+    app/main.py \
     app/pc_tools.py \
     app/tools_catalog.py \
     .gitignore \

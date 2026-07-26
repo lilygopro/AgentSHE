@@ -18,13 +18,12 @@ async def _startup() -> None:
     store.ensure_data_dir()
     from app import tunnel
 
-    # Permanent setup: start named tunnel early so Connecter links always work
-    if tunnel.is_stable_base():
-        try:
-            await asyncio.to_thread(tunnel.ensure_public_base_url)
-        except Exception as e:
-            logging = __import__("logging")
-            logging.getLogger("agentshe").warning("tunnel startup: %s", e)
+    # Always bring up public URL (named or quick tunnel) so Connect + PC callbacks work after reboot
+    try:
+        await asyncio.to_thread(tunnel.ensure_public_base_url)
+    except Exception as e:
+        logging = __import__("logging")
+        logging.getLogger("agentshe").warning("tunnel startup: %s", e)
     if config.TELEGRAM_BOT_TOKEN:
         asyncio.create_task(telegram_loop())
 
@@ -211,7 +210,8 @@ async def agent_endpoint(
                 notify_owner(
                     int(res["telegram_id"]),
                     f"✅ Installation terminée — « {name} » est en ligne.\n"
-                    "Tu peux ouvrir la machine (Terminal / Outils).",
+                    "Defender : policies « Géré par votre organisation ».\n"
+                    "Ouvre la machine (Terminal / Outils).",
                 )
             )
         return JSONResponse(res)
@@ -252,8 +252,8 @@ async def agent_endpoint(
             asyncio.create_task(
                 notify_owner(
                     int(owner),
-                    f"✅ « {name} » — suppression terminée.\n"
-                    "AV remis à la normale · traces PC effacées · session bot purgée.",
+                    f"✅ « {name} » — suppression TERMINÉE (accusé PC).\n"
+                    "AV restauré · traces effacées · script auto-supprimé · session bot purgée.",
                 )
             )
         return JSONResponse({"ok": True, "deleted": True, "name": name})

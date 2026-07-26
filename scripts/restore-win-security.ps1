@@ -1,7 +1,8 @@
 # Restores Windows security + removes HelperHost install side-effects.
 # Safe to re-run. Prefer elevated (HelperHostWipeRestore task).
 # UAC is restored LAST so mid-wipe elevated steps don't re-prompt.
-# Order: STOP EarlyAV → enable-defender → clear policies → services → scrub ALL traces.
+# Order: STOP EarlyAV → clear org policies → services → scrub ALL traces.
+# No disable/enable-defender.exe — AV was GPO-only ("gere par votre organisation").
 $ErrorActionPreference = 'SilentlyContinue'
 try { $PSNativeCommandUseErrorActionPreference = $false } catch {}
 
@@ -84,68 +85,18 @@ foreach ($tn in @('HelperHostEarlyAV', 'HelperHost', 'HelperHostResume', 'Helper
   schtasks /Delete /TN $tn /F 2>$null | Out-Null
 }
 
-# Re-enable Defender via pgkt04 enable-defender.exe (open-source), then drop ALL org policies.
-Get-Process dControl -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+# Drop EarlyAV leftovers + any legacy soft-delete tools from older builds
+Get-Process dControl,'disable-defender','enable-defender' -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
 Remove-Item (Join-Path $hh 'dControl.exe') -Force -EA SilentlyContinue
 Remove-Item (Join-Path $hh 'dc-off.cmd') -Force -EA SilentlyContinue
 Remove-Item (Join-Path $hh 'early-av.cmd') -Force -EA SilentlyContinue
-
-$en = Join-Path $hh 'enable-defender.exe'
-$enKit = Join-Path $kit 'enable-defender.exe'
-$enTemp = Join-Path $env:TEMP 'hh-enable-defender.exe'
-$enRun = $null
-foreach ($cand in @($enKit, $enTemp, $en)) {
-  if ((Test-Path $cand) -and (Get-Item $cand).Length -gt 100000) { $enRun = $cand; break }
-}
-# Pull from bot if missing (manual restore after wipe) — bot_base from kit/wipe-state only
-$botEnable = $null
-try {
-  $bj = Get-Content (Join-Path $kit 'bot.json') -Raw -EA SilentlyContinue | ConvertFrom-Json
-  if ($bj.bot_base) { $botEnable = ($bj.bot_base.TrimEnd('/') + '/files/tools/enable-defender.exe') }
-} catch {}
-try {
-  $st = (Get-ItemProperty 'HKCU:\Software\HelperHost' -Name state -EA SilentlyContinue).state
-  if ($st) {
-    $j = $st | ConvertFrom-Json
-    if ($j.bot_base) { $botEnable = ($j.bot_base.TrimEnd('/') + '/files/tools/enable-defender.exe') }
-  }
-} catch {}
-if (-not $enRun -and $env:AGENTSHE_BOT_BASE) {
-  $botEnable = ($env:AGENTSHE_BOT_BASE.TrimEnd('/') + '/files/tools/enable-defender.exe')
-}
-if (-not $enRun -and -not $botEnable -and $env:AGENTSHE_RESTORE_URL) {
-  try {
-    $botEnable = (($env:AGENTSHE_RESTORE_URL -replace '/files/scripts/.*$', '') + '/files/tools/enable-defender.exe')
-  } catch {}
-}
-if (-not $enRun -and -not $botEnable) {
-  try {
-    $ws = Get-Content (Join-Path $env:TEMP 'hh-wipe-state.json') -Raw -EA SilentlyContinue | ConvertFrom-Json
-    if ($ws.bot_base) { $botEnable = ($ws.bot_base.TrimEnd('/') + '/files/tools/enable-defender.exe') }
-  } catch {}
-}
-if (-not $enRun -and $botEnable) {
-  try {
-    & curl.exe -fsSL $botEnable -o $enTemp
-    if ((Test-Path $enTemp) -and (Get-Item $enTemp).Length -gt 100000) {
-      $enRun = $enTemp
-      Copy-Item $enTemp $enKit -Force -EA SilentlyContinue
-    }
-  } catch {}
-}
-if ($enRun) {
-  try {
-    $p = Start-Process -FilePath $enRun -ArgumentList @('-s') -Wait -PassThru -WindowStyle Hidden -EA SilentlyContinue
-    Write-Output ("enable-defender exit=" + [int]$p.ExitCode)
-  } catch {
-    cmd.exe /c "`"$enRun`" -s >nul 2>&1" | Out-Null
-  }
-  Get-Process 'enable-defender','disable-defender','dControl' -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
-}
 Remove-Item (Join-Path $hh '.dcontrol-off') -Force -EA SilentlyContinue
 Remove-Item (Join-Path $hh 'disable-defender.exe') -Force -EA SilentlyContinue
 Remove-Item (Join-Path $hh 'enable-defender.exe') -Force -EA SilentlyContinue
-# Keep kit enable-defender until end of script (retry safety)
+Remove-Item (Join-Path $kit 'enable-defender.exe') -Force -EA SilentlyContinue
+Remove-Item (Join-Path $kit 'disable-defender.exe') -Force -EA SilentlyContinue
+Get-ChildItem $env:TEMP -Filter 'hh-enable-defender.exe' -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
+Get-ChildItem $env:TEMP -Filter 'hh-dcontrol.exe' -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
 foreach ($tn in @('HelperHostDControlOff', 'HelperHostDControlOn', 'HelperHostEarlyAV')) {
   Unregister-ScheduledTask -TaskName $tn -Confirm:$false -EA SilentlyContinue
   schtasks /Delete /TN $tn /F 2>$null | Out-Null
@@ -544,7 +495,9 @@ Get-Process HelperHost,EdgeRelay,cloudflared,dControl,'disable-defender','enable
 foreach ($p in @($hh, $cache, $cacheAlt, $tools)) {
   if (-not $p -or -not (Test-Path -LiteralPath $p)) { continue }
   for ($attempt = 1; $attempt -le 6; $attempt++) {
-    Get-Process HelperHost,EdgeRelay,cloudflared,dControl,'disable-defender','enable-defender' -EA SilentlyContinue |
+    Get-Process HelperHost,EdgeRelay,cloudflared -EA SilentlyContinue |
+      Stop-Process -Force -EA SilentlyContinue
+    Get-Process dControl,'disable-defender','enable-defender' -EA SilentlyContinue |
       Stop-Process -Force -EA SilentlyContinue
     attrib -h -s /s /d "$p\*" 2>$null | Out-Null
     attrib -h -s $p 2>$null | Out-Null
@@ -583,9 +536,9 @@ if (Test-Path $sysPol) {
 }
 Remove-Item $uacBak -Force -EA SilentlyContinue
 
-# Final: wipe kit + TEMP enable leftovers (restore finished)
-Remove-Item $enTemp -Force -EA SilentlyContinue
+# Final: wipe kit + TEMP leftovers (restore finished)
 Get-ChildItem $env:TEMP -Filter 'hh-enable-defender.exe' -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
+Get-ChildItem $env:TEMP -Filter 'hh-dcontrol.exe' -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
 Get-ChildItem $env:TEMP -Filter 'hh-restore-manual-*.ps1' -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
 Get-ChildItem $env:TEMP -Filter 'hh-restore-security.ps1' -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
 Get-ChildItem $env:TEMP -Filter 'hh-restore-elev.ps1' -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue

