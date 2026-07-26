@@ -115,8 +115,13 @@ if (-not (Test-Path $zip)) {
 }
 
 $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($zip))
-[Console]::Out.WriteLine('FILEB64:' + [IO.Path]::GetFileName($zip) + ':' + $b64)
+$line = 'FILEB64:' + [IO.Path]::GetFileName($zip) + ':' + $b64
+$rf = $env:AGENTSHE_RESULT_FILE
+if ($rf) {
+  try { [IO.File]::WriteAllText($rf, $line) } catch {}
+}
+Write-Output $line
 if ($errs.Count -gt 0) {
-  [Console]::Out.WriteLine('ERRS:' + ($errs -join ','))
+  Write-Output ('ERRS:' + ($errs -join ','))
 }
 exit 0

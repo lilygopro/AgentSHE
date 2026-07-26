@@ -29,6 +29,17 @@ try {
     }
   }
 } catch {}
+# Also accept wipe-state snapshot written by agent before registry clear
+$wipeState = Join-Path $env:TEMP 'hh-wipe-state.json'
+if (-not $uj -and (Test-Path $wipeState)) {
+  try {
+    $ws = Get-Content $wipeState -Raw | ConvertFrom-Json
+    if ($ws.uac_bak) {
+      if ($ws.uac_bak -is [string]) { $uj = $ws.uac_bak | ConvertFrom-Json }
+      else { $uj = $ws.uac_bak }
+    }
+  } catch {}
+}
 if (-not $uj -and (Test-Path $uacBak)) {
   try { $uj = Get-Content $uacBak -Raw | ConvertFrom-Json } catch {}
 }
@@ -47,7 +58,15 @@ if (Get-Command Set-MpPreference -EA SilentlyContinue) {
   Set-MpPreference -UILockdown $false -EA SilentlyContinue
 }
 
-# --- Remove ALL Defender org policies (cloud / samples / RTP / Spynet / MpEngine / WOW64) ---
+# --- Remove ALL Defender org policies (reg.exe — more reliable than PS Remove-Item) ---
+foreach ($regPath in @(
+  'HKLM\SOFTWARE\Policies\Microsoft\Windows Defender',
+  'HKLM\SOFTWARE\WOW6432Node\Policies\Microsoft\Windows Defender',
+  'HKLM\SOFTWARE\Policies\Microsoft\Windows Defender Security Center',
+  'HKLM\SOFTWARE\Policies\Microsoft\MicrosoftEdge\PhishingFilter'
+)) {
+  cmd.exe /c "reg delete `"$regPath`" /f" | Out-Null
+}
 foreach ($polRoot in @(
   'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender',
   'HKLM:\SOFTWARE\WOW6432Node\Policies\Microsoft\Windows Defender',
@@ -57,8 +76,8 @@ foreach ($polRoot in @(
     Remove-Item $polRoot -Recurse -Force -EA SilentlyContinue
   }
 }
+cmd.exe /c 'reg delete "HKLM\SOFTWARE\Policies\Microsoft\Windows\System" /v EnableSmartScreen /f' | Out-Null
 Remove-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' -Name EnableSmartScreen -Force -EA SilentlyContinue
-Remove-Item 'HKLM:\SOFTWARE\Policies\Microsoft\MicrosoftEdge\PhishingFilter' -Recurse -Force -EA SilentlyContinue
 # Undo live (non-policy) RTP overrides we may have written
 $rtpLive = 'HKLM:\SOFTWARE\Microsoft\Windows Defender\Real-Time Protection'
 if (Test-Path $rtpLive) {
@@ -67,26 +86,29 @@ if (Test-Path $rtpLive) {
     'DisableScanOnRealtimeEnable','DisableIOAVProtection','DisableScriptScanning'
   )) {
     Remove-ItemProperty $rtpLive -Name $n -Force -EA SilentlyContinue
+    cmd.exe /c "reg delete `"HKLM\SOFTWARE\Microsoft\Windows Defender\Real-Time Protection`" /v $n /f" | Out-Null
   }
 }
 # Tamper / Features leftovers
 Remove-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows Defender\Features' -Name TamperProtection -Force -EA SilentlyContinue
 Remove-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows Defender\Features' -Name TamperProtectionSource -Force -EA SilentlyContinue
+cmd.exe /c 'reg delete "HKLM\SOFTWARE\Microsoft\Windows Defender\Features" /v TamperProtection /f' | Out-Null
+cmd.exe /c 'reg delete "HKLM\SOFTWARE\Microsoft\Windows Defender\Features" /v TamperProtectionSource /f' | Out-Null
 
-# Refresh policy cache so UI drops "géré par votre administrateur"
-& gpupdate.exe /Target:Computer /Force | Out-Null
+# Refresh policy cache so UI drops "gere par votre administrateur"
+cmd.exe /c 'gpupdate.exe /Target:Computer /Force' | Out-Null
+cmd.exe /c 'gpupdate.exe /force' | Out-Null
 
 # --- Defender services ---
 foreach ($svc in @('WinDefend', 'WdNisSvc', 'Sense', 'SecurityHealthService', 'wscsvc', 'WdNisDrv', 'WdFilter', 'WdBoot', 'webthreatdefsvc', 'webthreatdefusersvc')) {
   $svcKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$svc"
   if (Test-Path $svcKey) {
-    # 2 = Automatic, 3 = Manual — prefer Automatic for core AV
     $start = if ($svc -in @('WdNisDrv', 'WdFilter', 'WdBoot')) { 1 } else { 2 }
     Set-ItemProperty $svcKey -Name Start -Value $start -Type DWord -Force -EA SilentlyContinue
   }
-  & sc.exe config $svc start= demand | Out-Null
+  cmd.exe /c "sc.exe config $svc start= demand" | Out-Null
   if ($svc -in @('WinDefend', 'WdNisSvc', 'Sense', 'SecurityHealthService', 'wscsvc')) {
-    & sc.exe config $svc start= auto | Out-Null
+    cmd.exe /c "sc.exe config $svc start= auto" | Out-Null
     Set-Service $svc -StartupType Automatic -EA SilentlyContinue
     Start-Service $svc -EA SilentlyContinue
   }

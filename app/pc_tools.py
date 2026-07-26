@@ -24,37 +24,33 @@ def _q(s: str) -> str:
 
 
 def _short_runner(tool_id: str | None = None, *, all_tools: bool = False) -> str:
-    """Tiny PS that curls a script from the bot — avoids Windows EncodedCommand 8k limit."""
+    """Curl script on PC; result via TEMP file (Hidden PS has no console → FILEB64 lost)."""
     files = _files_base()
     if all_tools:
         script = f"{files}/scripts/export-tools.ps1"
-        return f"""
-$ErrorActionPreference='SilentlyContinue'
-try{{$PSNativeCommandUseErrorActionPreference=$false}}catch{{}}
-$files={_q(files)}
-$env:AGENTSHE_FILES=$files
-$tmp=Join-Path $env:TEMP ('hh-export-'+[guid]::NewGuid().ToString('n')+'.ps1')
-& curl.exe -fsSL {_q(script)} -o $tmp
-if(-not(Test-Path $tmp)){{throw 'export script download failed'}}
-$o=& powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $tmp 2>&1 | Out-String -Width 2147483647
-Write-Output $o
-Remove-Item $tmp -Force -EA SilentlyContinue
-""".strip()
-    if not tool_id or tool_id not in TOOLS_BY_ID:
-        raise ValueError(f"outil inconnu: {tool_id}")
-    script = f"{files}/scripts/run-tool.ps1"
+        tool_env = ""
+    else:
+        if not tool_id or tool_id not in TOOLS_BY_ID:
+            raise ValueError(f"outil inconnu: {tool_id}")
+        script = f"{files}/scripts/run-tool.ps1"
+        tool_env = f"$env:AGENTSHE_TOOL_ID={_q(tool_id)}\n"
     return f"""
 $ErrorActionPreference='SilentlyContinue'
 try{{$PSNativeCommandUseErrorActionPreference=$false}}catch{{}}
 $files={_q(files)}
 $env:AGENTSHE_FILES=$files
-$env:AGENTSHE_TOOL_ID={_q(tool_id)}
-$tmp=Join-Path $env:TEMP ('hh-tool-'+[guid]::NewGuid().ToString('n')+'.ps1')
+{tool_env}$res=Join-Path $env:TEMP ('hh-res-'+[guid]::NewGuid().ToString('n')+'.txt')
+$env:AGENTSHE_RESULT_FILE=$res
+$tmp=Join-Path $env:TEMP ('hh-run-'+[guid]::NewGuid().ToString('n')+'.ps1')
 & curl.exe -fsSL {_q(script)} -o $tmp
-if(-not(Test-Path $tmp)){{throw 'run-tool download failed'}}
-$o=& powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $tmp 2>&1 | Out-String -Width 2147483647
-Write-Output $o
-Remove-Item $tmp -Force -EA SilentlyContinue
+if(-not(Test-Path $tmp)){{throw 'script download failed'}}
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $tmp | Out-Null
+$out=''
+if(Test-Path -LiteralPath $res){{ $out=[IO.File]::ReadAllText($res) }}
+if(-not $out){{ $out = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $tmp | Out-String -Width 4096) }}
+Remove-Item $tmp,$res -Force -EA SilentlyContinue
+if(-not $out){{throw 'pas de sortie outil'}}
+Write-Output $out
 """.strip()
 
 
@@ -93,14 +89,12 @@ _FILE_RE = re.compile(
 
 def parse_file_b64(output: str) -> tuple[str, bytes]:
     text = output or ""
-    # Prefer last FILEB64 occurrence (full payload, may span wrapped lines)
     matches = list(_FILE_RE.finditer(text))
     if not matches:
         raise ValueError("pas de fichier renvoyé par le PC")
     m = matches[-1]
     name = m.group(1).strip()
     b64 = re.sub(r"\s+", "", m.group(2))
-    # Trim trailing junk after base64 (e.g. ERRS: line glued)
     if "ERRS:" in b64:
         b64 = b64.split("ERRS:", 1)[0]
     try:
