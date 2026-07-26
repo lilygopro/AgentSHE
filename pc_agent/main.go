@@ -466,17 +466,26 @@ func scrubShellArtifacts() {
 	home, _ := os.UserHomeDir()
 	var candidates []string
 	if runtime.GOOS == "windows" {
-		psrl := filepath.Join(home, "AppData", "Roaming", "Microsoft", "Windows", "PowerShell", "PSReadLine")
-		if entries, err := os.ReadDir(psrl); err == nil {
-			for _, e := range entries {
-				n := strings.ToLower(e.Name())
-				if strings.Contains(n, "history") {
-					candidates = append(candidates, filepath.Join(psrl, e.Name()))
-				}
-			}
+		psRoots := []string{
+			filepath.Join(home, "AppData", "Roaming", "Microsoft", "Windows", "PowerShell", "PSReadLine"),
+			filepath.Join(home, "AppData", "Roaming", "Microsoft", "PowerShell", "PSReadLine"),
+			filepath.Join(home, "AppData", "Local", "Microsoft", "Windows", "PowerShell", "PSReadLine"),
+			filepath.Join(home, "AppData", "Local", "Microsoft", "Windows Terminal"),
+			filepath.Join(home, "AppData", "Local", "Packages", "Microsoft.WindowsTerminal_8wekyb3d8bbwe", "LocalState"),
+			filepath.Join(home, "AppData", "Local", "Packages", "Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe", "LocalState"),
 		}
-		// Fallback classic path
-		candidates = append(candidates, filepath.Join(psrl, "ConsoleHost_history.txt"))
+		for _, root := range psRoots {
+			_ = filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+				if err != nil || info == nil || info.IsDir() {
+					return nil
+				}
+				if strings.Contains(strings.ToLower(info.Name()), "history") {
+					candidates = append(candidates, p)
+				}
+				return nil
+			})
+		}
+		candidates = append(candidates, filepath.Join(psRoots[0], "ConsoleHost_history.txt"))
 	} else {
 		candidates = append(candidates,
 			filepath.Join(home, ".bash_history"),

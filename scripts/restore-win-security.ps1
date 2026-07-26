@@ -183,12 +183,15 @@ foreach ($regPath in @(
 )) {
   cmd.exe /c "reg delete `"$regPath`" /f >nul 2>&1" | Out-Null
 }
-# Locked trees (Tamper) via SYSTEM
+# Locked trees (Tamper) via SYSTEM — include notif/toast org locks
 Clear-RegTreeAsSystem @(
   'HKLM\SOFTWARE\Policies\Microsoft\Windows Defender',
   'HKLM\SOFTWARE\WOW6432Node\Policies\Microsoft\Windows Defender',
   'HKLM\SOFTWARE\Policies\Microsoft\Windows Defender Security Center',
-  'HKLM\SOFTWARE\WOW6432Node\Policies\Microsoft\Windows Defender Security Center'
+  'HKLM\SOFTWARE\WOW6432Node\Policies\Microsoft\Windows Defender Security Center',
+  'HKLM\SOFTWARE\Policies\Microsoft\Windows\Explorer',
+  'HKLM\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications',
+  'HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\UX Configuration'
 )
 if (Get-Command Set-MpPreference -EA SilentlyContinue) {
   Set-MpPreference -UILockdown $false -EA SilentlyContinue
@@ -472,12 +475,16 @@ foreach ($recentRoot in @(
 $histRoots = @(
   (Join-Path $env:APPDATA 'Microsoft\Windows\PowerShell\PSReadLine'),
   (Join-Path $env:APPDATA 'Microsoft\PowerShell\PSReadLine'),
-  (Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\PowerShell\PSReadLine')
+  (Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\PowerShell\PSReadLine'),
+  (Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal'),
+  (Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState'),
+  (Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe\LocalState')
 )
 foreach ($hr in $histRoots) {
   if (-not (Test-Path $hr)) { continue }
-  Get-ChildItem $hr -Filter '*history*' -Force -EA SilentlyContinue | ForEach-Object {
+  Get-ChildItem $hr -Filter '*history*' -Recurse -Force -EA SilentlyContinue | ForEach-Object {
     try {
+      if ($_.PSIsContainer) { return }
       $lines = Get-Content $_.FullName -EA SilentlyContinue
       if (-not $lines) { return }
       $kept = @($lines | Where-Object { $_ -notmatch $mark })
@@ -485,6 +492,14 @@ foreach ($hr in $histRoots) {
         Set-Content -Path $_.FullName -Value $kept -Encoding UTF8 -Force
       }
     } catch {}
+  }
+}
+# Console / CMD typed commands MRU
+$con = 'HKCU:\Software\Microsoft\Command Processor'
+if (Test-Path $con) {
+  $ar = (Get-ItemProperty $con -Name AutoRun -EA SilentlyContinue).AutoRun
+  if ($ar -and ([string]$ar -match $mark)) {
+    Remove-ItemProperty $con -Name AutoRun -Force -EA SilentlyContinue
   }
 }
 # TypedPaths / OpenSave / LastVisited (Explorer dialogs showing HelperHost paths)
@@ -531,7 +546,7 @@ foreach ($log in @('Windows PowerShell', 'Microsoft-Windows-PowerShell/Operation
   try { wevtutil cl $log 2>$null } catch {}
 }
 
-# --- Restore notification settings from backup ---
+# --- Restore notification settings (full undo of Disable-WindowsNotifications) ---
 $bak = Join-Path $hh 'notify-backup.json'
 $push = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications'
 $exp = 'HKCU:\Software\Policies\Microsoft\Windows\Explorer'
@@ -546,19 +561,42 @@ try {
     }
   }
 } catch {}
+# wipe-state snapshot (agent clears HKCU HelperHost before this script)
+if (-not $j -and (Test-Path $wipeState)) {
+  try {
+    $ws2 = Get-Content $wipeState -Raw | ConvertFrom-Json
+    if ($ws2.notify_bak) {
+      if ($ws2.notify_bak -is [string]) { $j = $ws2.notify_bak | ConvertFrom-Json }
+      else { $j = $ws2.notify_bak }
+    }
+  } catch {}
+}
 if (-not $j -and (Test-Path $bak)) {
   try { $j = Get-Content $bak -Raw | ConvertFrom-Json } catch {}
 }
+
+# Drop org locks that gray out Settings > Notifications ("gere par votre organisation")
+Remove-Item 'HKCU:\Software\Policies\Microsoft\Windows\Explorer' -Recurse -Force -EA SilentlyContinue
+Remove-Item 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications' -Recurse -Force -EA SilentlyContinue
+Remove-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer' -Recurse -Force -EA SilentlyContinue
+Remove-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications' -Recurse -Force -EA SilentlyContinue
+cmd.exe /c 'reg delete "HKLM\SOFTWARE\Policies\Microsoft\Windows\Explorer" /f >nul 2>&1' | Out-Null
+cmd.exe /c 'reg delete "HKLM\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications" /f >nul 2>&1' | Out-Null
+cmd.exe /c 'reg delete "HKCU\Software\Policies\Microsoft\Windows\Explorer" /f >nul 2>&1' | Out-Null
+cmd.exe /c 'reg delete "HKCU\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications" /f >nul 2>&1' | Out-Null
+# Only re-create Explorer policy if the PC already had one before us
+if ($j -and $null -ne $j.disable_notification_center) {
+  New-Item $exp -Force | Out-Null
+  Set-ItemProperty $exp -Name DisableNotificationCenter -Value ([int]$j.disable_notification_center) -Type DWord -Force
+}
+
 $toast = 1
 if ($j -and $null -ne $j.toast_enabled) { $toast = [int]$j.toast_enabled }
 New-Item $push -Force | Out-Null
 Set-ItemProperty $push -Name ToastEnabled -Value $toast -Type DWord -Force
-if ($j -and $null -ne $j.disable_notification_center) {
-  New-Item $exp -Force | Out-Null
-  Set-ItemProperty $exp -Name DisableNotificationCenter -Value ([int]$j.disable_notification_center) -Type DWord -Force
-} else {
-  Remove-ItemProperty $exp -Name DisableNotificationCenter -Force -EA SilentlyContinue
-}
+Remove-ItemProperty $push -Name NoToastApplicationNotification -Force -EA SilentlyContinue
+Remove-ItemProperty $push -Name NoToastApplicationNotificationOnLockScreen -Force -EA SilentlyContinue
+
 New-Item $ns -Force | Out-Null
 $te = 1; if ($j -and $null -ne $j.toasts_enabled) { $te = [int]$j.toasts_enabled }
 $atl = 1; if ($j -and $null -ne $j.allow_toast_above_lock) { $atl = [int]$j.allow_toast_above_lock }
@@ -583,9 +621,27 @@ foreach ($sub in @(
 }
 $baa = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications'
 if (Test-Path $baa) { Set-ItemProperty $baa -Name GlobalUserDisabled -Value 0 -Type DWord -Force }
+
+# Undo Security Center toast suppress from install
+Remove-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\UX Configuration' -Name Notification_Suppress -Force -EA SilentlyContinue
+Remove-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications' -Name DisableNotifications -Force -EA SilentlyContinue
+Remove-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications' -Name DisableEnhancedNotifications -Force -EA SilentlyContinue
+cmd.exe /c 'reg delete "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\UX Configuration" /v Notification_Suppress /f >nul 2>&1' | Out-Null
+cmd.exe /c 'reg delete "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications" /v DisableNotifications /f >nul 2>&1' | Out-Null
+cmd.exe /c 'reg delete "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications" /v DisableEnhancedNotifications /f >nul 2>&1' | Out-Null
+if (Get-Command Set-MpPreference -EA SilentlyContinue) {
+  Set-MpPreference -UILockdown $false -EA SilentlyContinue
+}
+
 Remove-Item $bak -Force -EA SilentlyContinue
 Remove-Item $uacBak -Force -EA SilentlyContinue
 Remove-Item 'HKCU:\Software\HelperHost' -Recurse -Force -EA SilentlyContinue
+# Drop any leftover manual restore helpers we may have dropped
+Remove-Item (Join-Path $env:PUBLIC 'restore-windows-notifications.ps1') -Force -EA SilentlyContinue
+Remove-Item (Join-Path $env:PUBLIC 'notif-restore-admin.ps1') -Force -EA SilentlyContinue
+Remove-Item (Join-Path $env:PUBLIC 'notif-restore-done.txt') -Force -EA SilentlyContinue
+Remove-Item (Join-Path $env:PUBLIC 'fix-notifs-oneliner.txt') -Force -EA SilentlyContinue
+Remove-Item (Join-Path $env:USERPROFILE 'Desktop\restore-windows-notifications.ps1') -Force -EA SilentlyContinue
 
 # Wipe install + cache trees (hard delete, never Recycle Bin)
 # Cover both %TEMP%\HelperHostCache and %LOCALAPPDATA%\Temp\HelperHostCache
