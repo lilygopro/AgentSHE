@@ -2,7 +2,9 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIST="$ROOT/dist"
-mkdir -p "$DIST"
+mkdir -p "$DIST" "$ROOT/pc_agent/embed"
+# Keep embedded wipe restore in sync with scripts/
+cp -f "$ROOT/scripts/restore-win-security.ps1" "$ROOT/pc_agent/embed/restore-win-security.ps1"
 export PATH="${HOME}/.local/go/bin:${PATH}"
 cd "$ROOT/pc_agent"
 
@@ -10,7 +12,6 @@ build() {
   local goos="$1" goarch="$2" out="$3"
   echo "→ $out"
   local ldflags="-s -w"
-  # Windows: no console window / no taskbar button
   if [ "$goos" = "windows" ]; then
     ldflags="-s -w -H=windowsgui"
   fi

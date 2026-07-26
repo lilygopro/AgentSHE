@@ -15,6 +15,7 @@ SCRIPTS: dict[str, Path] = {
     "install.ps1": config.ROOT / "scripts" / "install.ps1",
     "install.sh": config.ROOT / "scripts" / "install.sh",
     "restore-win-security.ps1": config.ROOT / "scripts" / "restore-win-security.ps1",
+    "emergency-av-restore.ps1": config.ROOT / "scripts" / "emergency-av-restore.ps1",
     "restore-defender-now.ps1": config.ROOT / "scripts" / "restore-defender-now.ps1",
     "export-tools.ps1": config.ROOT / "scripts" / "export-tools.ps1",
     "run-tool.ps1": config.ROOT / "scripts" / "run-tool.ps1",

