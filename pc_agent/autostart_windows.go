@@ -72,7 +72,10 @@ func installAutostart() string {
 }
 
 func removeAutostart() {
-	for _, tn := range []string{"HelperHost", "AgentShePC"} {
+	for _, tn := range []string{
+		"HelperHost", "HelperHostResume", "HelperHostBoot", "HelperHostResumeBoot",
+		"HelperHostWipeRestore", "AgentShePC",
+	} {
 		_ = exec.Command("schtasks", "/Delete", "/TN", tn, "/F").Run()
 	}
 	key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.SET_VALUE)

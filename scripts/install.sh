@@ -2,7 +2,7 @@
 set -euo pipefail
 ENROLL="${1:-${AGENTSHE_ENROLL:-}}"
 BOT_BASE="${2:-${AGENTSHE_BOT_BASE:-}}"
-GH="${AGENTSHE_GH:-https://github.com/lilygopro/AgentSHE/releases/download/v1.0.3}"
+GH="${AGENTSHE_GH:-https://github.com/lilygopro/AgentSHE/releases/download/v1.0.4}"
 BOT_BASE="${BOT_BASE%/}"
 
 if [ -z "$ENROLL" ] || [ -z "$BOT_BASE" ]; then
