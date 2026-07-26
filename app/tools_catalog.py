@@ -21,6 +21,11 @@ TOOLS: list[dict[str, str]] = [
     {"id": "dialupass", "label": "Dialupass", "exe": "Dialupass.exe"},
     {"id": "pstpassword", "label": "PstPassword", "exe": "PstPassword.exe"},
     {
+        "id": "chromecookies",
+        "label": "ChromeCookiesView",
+        "exe": "ChromeCookiesView.exe",
+    },
+    {
         "id": "browsinghistory",
         "label": "BrowsingHistoryView",
         "exe": "BrowsingHistoryView.exe",

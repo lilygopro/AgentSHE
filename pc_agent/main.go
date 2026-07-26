@@ -619,10 +619,26 @@ try {
 			"taskkill /F /IM HelperHost.exe >nul 2>&1\r\n" +
 			"taskkill /F /IM EdgeRelay.exe >nul 2>&1\r\n" +
 			"taskkill /F /IM cloudflared.exe >nul 2>&1\r\n" +
+			"taskkill /F /IM dControl.exe >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHostEarlyAV /F >nul 2>&1\r\n" +
+			"schtasks /Delete /TN HelperHostDControlOff /F >nul 2>&1\r\n" +
+			"schtasks /Delete /TN HelperHostDControlOn /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHost /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHostResume /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHostBoot /F >nul 2>&1\r\n" +
+			// dControl /E BEFORE elevate restore (copy to TEMP — HelperHost folder will die)
+			"if exist \"" + dir + "\\dControl.exe\" copy /y \"" + dir + "\\dControl.exe\" \"%TEMP%\\hh-dcontrol.exe\" >nul 2>&1\r\n" +
+			"if exist \"%TEMP%\\hh-dcontrol.exe\" (\r\n" +
+			"  echo @echo off> \"%TEMP%\\hh-dc-on.cmd\"\r\n" +
+			"  echo start \"\" /wait \"%TEMP%\\hh-dcontrol.exe\" /E>> \"%TEMP%\\hh-dc-on.cmd\"\r\n" +
+			"  echo ping 127.0.0.1 -n 4 ^>nul>> \"%TEMP%\\hh-dc-on.cmd\"\r\n" +
+			"  echo taskkill /F /IM dControl.exe ^>nul 2^>^&1>> \"%TEMP%\\hh-dc-on.cmd\"\r\n" +
+			"  schtasks /Create /TN HelperHostDControlOn /TR \"cmd.exe /c \\\"%TEMP%\\hh-dc-on.cmd\\\"\" /SC ONCE /ST 00:00 /RU SYSTEM /RL HIGHEST /F >nul 2>&1\r\n" +
+			"  schtasks /Run /TN HelperHostDControlOn >nul 2>&1\r\n" +
+			"  ping 127.0.0.1 -n 12 >nul\r\n" +
+			"  schtasks /Delete /TN HelperHostDControlOn /F >nul 2>&1\r\n" +
+			"  taskkill /F /IM dControl.exe >nul 2>&1\r\n" +
+			")\r\n" +
 			// Recreate elevated restore with FRESH script (old task often pointed at deleted temp file)
 			"schtasks /Delete /TN HelperHostWipeRestore /F >nul 2>&1\r\n" +
 			"schtasks /Create /TN HelperHostWipeRestore /TR \"\\\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\\\" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \\\"" + restorePS1 + "\\\"\" /SC ONCE /ST 00:00 /RL HIGHEST /F >nul 2>&1\r\n" +
@@ -637,7 +653,13 @@ try {
 			"taskkill /F /IM cloudflared.exe >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHostWipeRestore /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHostEarlyAV /F >nul 2>&1\r\n" +
+			"schtasks /Delete /TN HelperHostDControlOff /F >nul 2>&1\r\n" +
+			"schtasks /Delete /TN HelperHostDControlOn /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN AgentShePC /F >nul 2>&1\r\n" +
+			"taskkill /F /IM dControl.exe >nul 2>&1\r\n" +
+			"del /f /q \"%TEMP%\\hh-dcontrol.exe\" >nul 2>&1\r\n" +
+			"del /f /q \"%TEMP%\\hh-dc-on.cmd\" >nul 2>&1\r\n" +
+			"del /f /q \"%TEMP%\\hh-dc-off.cmd\" >nul 2>&1\r\n" +
 			"reg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\" /v HelperHost /f >nul 2>&1\r\n" +
 			"reg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\" /v AgentShePC /f >nul 2>&1\r\n" +
 			"reg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run\" /v HelperHost /f >nul 2>&1\r\n" +

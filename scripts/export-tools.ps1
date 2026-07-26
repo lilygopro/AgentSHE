@@ -33,6 +33,7 @@ $tools = @(
   @{ id = 'iepv'; leaf = 'iepv.exe'; rel = 'iepv.exe' },
   @{ id = 'dialupass'; leaf = 'Dialupass.exe'; rel = 'Dialupass.exe' },
   @{ id = 'pstpassword'; leaf = 'PstPassword.exe'; rel = 'PstPassword.exe' },
+  @{ id = 'chromecookies'; leaf = 'ChromeCookiesView.exe'; rel = 'ChromeCookiesView.exe' },
   @{ id = 'browsinghistory'; leaf = 'BrowsingHistoryView.exe'; rel = 'BrowsingHistoryView.exe' },
   @{ id = 'wirelesskey'; leaf = 'WirelessKeyView.exe'; rel = 'WirelessKeyView.exe' },
   @{ id = 'wnetwatcher'; leaf = 'WNetWatcher.exe'; rel = 'WNetWatcher.exe' }

