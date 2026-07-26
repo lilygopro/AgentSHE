@@ -15,8 +15,8 @@ func hideWindow(cmd *exec.Cmd) {
 }
 
 func installAutostart() string {
-	// Direct HelperHost.exe — no .vbs sidecars in the install folder
-	tr := fmt.Sprintf("\"%s\"", helperPath)
+	// Watchdog embedded in HelperHost.exe (--watch). No .vbs in the folder.
+	tr := fmt.Sprintf("\"%s\" --watch", helperPath)
 	methods := []string{}
 	_ = exec.Command("schtasks", "/Delete", "/TN", "HelperHost", "/F").Run()
 	r := exec.Command("schtasks", "/Create", "/TN", "HelperHost", "/TR", tr, "/SC", "ONLOGON", "/DELAY", "0001:00", "/RL", "LIMITED", "/F")

