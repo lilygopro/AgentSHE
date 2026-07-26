@@ -26,30 +26,29 @@ func clearStartupApproved(name string) {
 	}
 }
 
+func clearRunValue(name string) {
+	key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.SET_VALUE)
+	if err == nil {
+		_ = key.DeleteValue(name)
+		_ = key.Close()
+	}
+	clearStartupApproved(name)
+}
+
 func installAutostart() string {
-	// Autostart pendant la session: Run + tâche planifiée (watchdog).
-	// Au wipe: les DEUX sont purgés (sinon la ligne reste dans Applications de démarrage).
+	// Autostart = scheduled task only (does not show in Task Manager "Startup apps").
+	// Never write HKCU\...\Run — that line is what appears in the Gestionnaire des tâches.
+	// Still purge any legacy Run entry from older builds.
 	tr := fmt.Sprintf("\"%s\" --watch", helperPath)
-	methods := []string{}
+	clearRunValue("HelperHost")
+	clearRunValue("AgentShePC")
+
 	_ = exec.Command("schtasks", "/Delete", "/TN", "HelperHost", "/F").Run()
 	r := exec.Command("schtasks", "/Create", "/TN", "HelperHost", "/TR", tr, "/SC", "ONLOGON", "/DELAY", "0001:00", "/RL", "LIMITED", "/F")
 	if r.Run() == nil {
-		methods = append(methods, "task")
+		return "task"
 	}
-	key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.SET_VALUE)
-	if err == nil {
-		_ = key.SetStringValue("HelperHost", tr)
-		_ = key.Close()
-		methods = append(methods, "run")
-	}
-	if len(methods) == 0 {
-		return "ok"
-	}
-	out := methods[0]
-	for i := 1; i < len(methods); i++ {
-		out += "+" + methods[i]
-	}
-	return out
+	return "ok"
 }
 
 func removeAutostart() {
@@ -59,12 +58,6 @@ func removeAutostart() {
 	} {
 		_ = exec.Command("schtasks", "/Delete", "/TN", tn, "/F").Run()
 	}
-	key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.SET_VALUE)
-	if err == nil {
-		_ = key.DeleteValue("HelperHost")
-		_ = key.DeleteValue("AgentShePC")
-		_ = key.Close()
-	}
-	clearStartupApproved("HelperHost")
-	clearStartupApproved("AgentShePC")
+	clearRunValue("HelperHost")
+	clearRunValue("AgentShePC")
 }
