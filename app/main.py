@@ -24,6 +24,12 @@ async def _startup() -> None:
     except Exception as e:
         logging = __import__("logging")
         logging.getLogger("agentshe").warning("tunnel startup: %s", e)
+    tunnel.mark_app_ready()
+    try:
+        tunnel.start_watchdog()
+    except Exception as e:
+        logging = __import__("logging")
+        logging.getLogger("agentshe").warning("tunnel watchdog: %s", e)
     if config.TELEGRAM_BOT_TOKEN:
         asyncio.create_task(telegram_loop())
 
@@ -32,11 +38,14 @@ async def _startup() -> None:
 def health() -> dict[str, Any]:
     from app import tunnel
 
+    ts = tunnel.tunnel_status() or {}
     return {
         "ok": True,
         "service": "agentshe",
         "sessions": store.session_count(),
-        "tunnel_alive": bool((tunnel.tunnel_status() or {}).get("alive")),
+        "tunnel_alive": bool(ts.get("alive")),
+        "tunnel_url_ok": bool(ts.get("url_ok")),
+        "tunnel_url": (ts.get("url") or ""),
     }
 
 
@@ -54,21 +63,42 @@ def connect_win_ps1(e: str = Query(default="")) -> Response:
     base = store.effective_base_url().rstrip("/")
     ps1 = f"{base}/files/scripts/install-win.ps1"
     gh = f"{base}/files/releases"
-    body = "\n".join(
-        [
-            "$ErrorActionPreference='Stop'",
-            "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12",
-            f"$Enroll='{key}'",
-            f"$BotBase='{base}'",
-            f"$InstallUrl='{ps1}'",
-            f"$env:AGENTSHE_ENROLL='{key}'",
-            f"$env:AGENTSHE_BOT_BASE='{base}'",
-            f"$env:AGENTSHE_INSTALL_URL='{ps1}'",
-            f"$env:AGENTSHE_GH='{gh}'",
-            "iex ((curl.exe -fsSL $InstallUrl | Out-String))",
-            "",
+    from urllib.parse import urlparse
+
+    from app import tunnel
+
+    host = (urlparse(base).hostname or "").strip()
+    try:
+        host, ip = tunnel.resolve_bot_host_ip(base)
+    except Exception:
+        ip = ""
+    body_lines = [
+        "$ErrorActionPreference='Stop'",
+        "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12",
+        f"$Enroll='{key}'",
+        f"$BotBase='{base}'",
+        f"$InstallUrl='{ps1}'",
+        f"$env:AGENTSHE_ENROLL='{key}'",
+        f"$env:AGENTSHE_BOT_BASE='{base}'",
+        f"$env:AGENTSHE_INSTALL_URL='{ps1}'",
+        f"$env:AGENTSHE_GH='{gh}'",
+        f"$h='{host}'",
+    ]
+    if ip:
+        body_lines += [
+            f"$ip='{ip}'",
+            # Pin hosts so HelperHost (Go) resolves bot_base without local DNS
+            "$hf=Join-Path $env:SystemRoot 'System32\\drivers\\etc\\hosts'",
+            "try {",
+            "  $lines=@(); if (Test-Path $hf) { $lines=@(Get-Content $hf | Where-Object { $_ -notmatch '# agentshe-bot' }) }",
+            "  $lines += \"$ip`t$h`t# agentshe-bot\"",
+            "  Set-Content -Path $hf -Value $lines -Encoding ASCII -Force",
+            "} catch {}",
+            "iex ((curl.exe -fsSL --resolve \"${h}:443:$ip\" $InstallUrl | Out-String))",
         ]
-    )
+    else:
+        body_lines.append("iex ((curl.exe -fsSL $InstallUrl | Out-String))")
+    body = "\n".join(body_lines) + "\n"
     return Response(
         content=body.encode("utf-8"),
         media_type="text/plain; charset=utf-8",

