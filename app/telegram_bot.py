@@ -18,23 +18,41 @@ API = "https://api.telegram.org/bot{token}"
 MAIN_KEYBOARD = None  # legacy unused
 REMOVE_KEYBOARD = {"remove_keyboard": True}
 
-NAV_INLINE = {
+NAV_HOME = {
     "inline_keyboard": [
         [
             {"text": "🖥 Machines", "callback_data": "menu:machines"},
             {"text": "🔗 Connecter", "callback_data": "menu:connect"},
         ],
-        [
-            {"text": "📡 Status", "callback_data": "menu:status"},
-            {"text": "⌨️ Terminal", "callback_data": "menu:terminal"},
-        ],
-        [
-            {"text": "🧰 Outils", "callback_data": "menu:tools"},
-            {"text": "🗑 Supprimer", "callback_data": "menu:delete"},
-        ],
         [{"text": "« Menu", "callback_data": "menu:home"}],
     ]
 }
+
+# Alias for older call sites
+NAV_INLINE = NAV_HOME
+
+
+def _machine_keyboard(sid: str | None = None) -> dict[str, Any]:
+    """Actions scoped to the currently selected machine only."""
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "⌨️ Terminal", "callback_data": "menu:terminal"},
+                {"text": "🧰 Outils", "callback_data": "menu:tools"},
+            ],
+            [
+                {"text": "📡 Status", "callback_data": "menu:status"},
+                {
+                    "text": "🗑 Supprimer",
+                    "callback_data": f"delask:{sid}" if sid else "menu:delete",
+                },
+            ],
+            [
+                {"text": "🖥 Autres machines", "callback_data": "menu:machines"},
+                {"text": "« Menu", "callback_data": "menu:home"},
+            ],
+        ]
+    }
 
 
 def _allowed(user_id: int) -> bool:
@@ -188,16 +206,27 @@ async def ui_home(
     message_id: int | None = None,
     force_new: bool = False,
 ) -> None:
-    active = _active_name(user_id) or "aucun"
+    sessions = store.list_sessions(owner_telegram_id=user_id)
+    active = _active_name(user_id)
+    lines = [
+        "AgentShe",
+        "",
+        "1) Connecter un PC",
+        "2) Choisir une machine",
+        "3) Terminal / Outils sur CETTE machine",
+        "",
+    ]
+    if active:
+        lines.append(f"Machine ouverte: « {active} »")
+    else:
+        lines.append("Aucune machine ouverte.")
+    lines.append(f"Machines: {len(sessions)}")
     await _panel(
         client,
         chat_id,
         user_id,
-        "AgentShe\n\n"
-        "Navigation = boutons ci-dessous (s’actualise).\n"
-        "Commandes shell = messages texte.\n\n"
-        f"Terminal actif: {active}",
-        NAV_INLINE,
+        "\n".join(lines),
+        NAV_HOME,
         message_id=message_id,
         force_new=force_new,
     )
@@ -286,9 +315,9 @@ async def ui_show_install_cmd(
         return
     from app import tunnel
 
-    title = "Mac / Linux" if kind == "mac" else "Windows (PowerShell)"
+    title = "Mac / Linux" if kind == "mac" else "Windows (CMD ou PowerShell)"
     tip = (
-        "Ouvre PowerShell → colle → Entrée."
+        "Colle dans CMD ou PowerShell → Entrée. La fenêtre se ferme seule."
         if kind != "mac"
         else "Colle dans le Terminal."
     )
@@ -388,7 +417,7 @@ async def ui_status(
             client,
             chat_id,
             user_id,
-            "Aucun terminal sélectionné.",
+            "Ouvre d’abord une machine.",
             {
                 "inline_keyboard": [
                     [{"text": "🖥 Machines", "callback_data": "menu:machines"}],
@@ -401,7 +430,7 @@ async def ui_status(
     owned = {x["id"]: x for x in store.list_sessions(owner_telegram_id=user_id)}
     if sid not in owned:
         await _panel(
-            client, chat_id, user_id, "Session inconnue.", NAV_INLINE, message_id=message_id
+            client, chat_id, user_id, "Session inconnue.", NAV_HOME, message_id=message_id
         )
         return
     raw = store.get_session(sid)
@@ -410,18 +439,10 @@ async def ui_status(
         client,
         chat_id,
         user_id,
-        f"{owned[sid]['name']}\n"
+        f"Machine: « {owned[sid]['name']} »\n"
         f"{'🟢 en ligne' if online else '⚪ hors ligne'}\n"
         "Session jusqu’à suppression.",
-        {
-            "inline_keyboard": [
-                [
-                    {"text": "⌨️ Terminal", "callback_data": "menu:terminal"},
-                    {"text": "🖥 Machines", "callback_data": "menu:machines"},
-                ],
-                [{"text": "« Menu", "callback_data": "menu:home"}],
-            ]
-        },
+        _machine_keyboard(sid),
         message_id=message_id,
     )
 
@@ -433,13 +454,15 @@ async def ui_terminal_hint(
     *,
     message_id: int | None = None,
 ) -> None:
+    binding = store.telegram_get_binding(user_id)
+    sid = binding.get("session_id")
     name = _active_name(user_id)
-    if not name:
+    if not name or not sid:
         await _panel(
             client,
             chat_id,
             user_id,
-            "Sélectionne d’abord une machine.",
+            "Ouvre d’abord une machine pour le terminal.",
             {
                 "inline_keyboard": [
                     [{"text": "🖥 Machines", "callback_data": "menu:machines"}]
@@ -452,15 +475,10 @@ async def ui_terminal_hint(
         client,
         chat_id,
         user_id,
-        f"Terminal « {name} »\n"
-        "Envoie tes commandes en message.\n"
-        "Pas besoin de recliquer.",
-        {
-            "inline_keyboard": [
-                [{"text": "🖥 Machines", "callback_data": "menu:machines"}],
-                [{"text": "« Menu", "callback_data": "menu:home"}],
-            ]
-        },
+        f"Terminal — « {name} » uniquement\n"
+        "Envoie une commande en message texte.\n"
+        "Les outils / statut concernent aussi cette machine.",
+        _machine_keyboard(sid),
         message_id=message_id,
     )
 
@@ -498,9 +516,10 @@ async def ui_tools(
     if row:
         rows.append(row)
     rows.append([{"text": "📦 Tous (zip)", "callback_data": "tool:all"}])
+    sid = store.telegram_get_binding(user_id).get("session_id")
     rows.append(
         [
-            {"text": "🖥 Machines", "callback_data": "menu:machines"},
+            {"text": "« Machine", "callback_data": f"use:{sid}" if sid else "menu:machines"},
             {"text": "« Menu", "callback_data": "menu:home"},
         ]
     )
@@ -508,9 +527,8 @@ async def ui_tools(
         client,
         chat_id,
         user_id,
-        f"Outils — « {name} »\n"
-        "Installe dans HelperHost\\tools, exécute en arrière-plan,\n"
-        "puis envoie le fichier ici.",
+        f"Outils — uniquement « {name} »\n"
+        "Télécharge / exécute sur ce PC, puis envoie le fichier ici.",
         {"inline_keyboard": rows},
         message_id=message_id,
     )
@@ -572,47 +590,24 @@ async def do_run_tool(
     mid = store.telegram_get_binding(user_id).get("ui_message_id")
     try:
         import base64 as b64mod
-        from datetime import datetime
 
-        async def _run_ps(ps: str, timeout: float = 120.0) -> str:
+        async def _run_ps(ps: str, timeout: float = 180.0) -> str:
+            # Prefer -File via tiny curl runner; EncodedCommand only if short.
             enc = b64mod.b64encode(ps.encode("utf-16le")).decode("ascii")
-            if len(enc) > 7000:
+            if len(enc) <= 6000:
+                cmd = f"powershell -NoProfile -WindowStyle Hidden -EncodedCommand {enc}"
+            else:
                 raise RuntimeError("commande trop longue pour Windows")
-            cmd = f"powershell -NoProfile -WindowStyle Hidden -EncodedCommand {enc}"
             result = await remote.pc_run(raw, cmd, timeout=timeout, record=False)
-            return str(result.get("output") or "")
+            out = str(result.get("output") or "")
+            if int(result.get("exit_code") or 0) != 0 and "FILEB64:" not in out:
+                raise RuntimeError(out.strip() or f"exit {result.get('exit_code')}")
+            return out
 
         if tool_id == "all":
-            collected: list[tuple[str, bytes]] = []
-            errors: list[str] = []
-            for i, t in enumerate(TOOLS, 1):
-                await _panel(
-                    client,
-                    chat_id,
-                    user_id,
-                    f"« {raw['name']} » — Tous ({i}/{len(TOOLS)})\n{t['label']}…",
-                    {"inline_keyboard": []},
-                    message_id=mid,
-                )
-                mid = store.telegram_get_binding(user_id).get("ui_message_id") or mid
-                try:
-                    out = await _run_ps(pc_tools.build_tool_ps(t["id"]), timeout=90.0)
-                    fname, data = pc_tools.parse_file_b64(out)
-                    collected.append((fname, data))
-                except Exception as te:
-                    errors.append(f"{t['id']}: {te}")
-                    collected.append(
-                        (f"{t['id']}.err.txt", str(te).encode("utf-8", errors="replace"))
-                    )
-            if not collected:
-                raise RuntimeError("aucun outil n'a renvoyé de fichier")
-            data = pc_tools.zip_tool_files(collected)
-            fname = f"tools-export-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.zip"
-            if errors:
-                failed = ", ".join(e.split(":", 1)[0] for e in errors[:8])
-                note = f" ({len(errors)} erreur(s): {failed})"
-            else:
-                note = ""
+            out = await _run_ps(pc_tools.build_all_tools_ps(), timeout=300.0)
+            fname, data = pc_tools.parse_file_b64(out)
+            note = ""
         else:
             out = await _run_ps(pc_tools.build_tool_ps(tool_id), timeout=120.0)
             fname, data = pc_tools.parse_file_b64(out)
@@ -701,7 +696,7 @@ async def do_delete(
     owned = {x["id"]: x for x in store.list_sessions(owner_telegram_id=user_id)}
     if sid not in owned:
         await _panel(
-            client, chat_id, user_id, "Introuvable.", NAV_INLINE, message_id=message_id
+            client, chat_id, user_id, "Introuvable.", NAV_HOME, message_id=message_id
         )
         return
     name = owned[sid]["name"]
@@ -710,35 +705,49 @@ async def do_delete(
         client,
         chat_id,
         user_id,
-        f"Suppression de « {name} »…",
+        f"Suppression de « {name} »…\nEffacement PC + restauration AV en cours.",
         {"inline_keyboard": []},
         message_id=message_id,
     )
     mid = store.telegram_get_binding(user_id).get("ui_message_id")
-    wiped = False
+    store.mark_wipe_pending(sid)
+    started = False
     if raw:
         try:
-            wiped = await remote.pc_shutdown(raw)
+            started = await remote.pc_shutdown(raw)
         except Exception:
-            wiped = False
-    from app import tunnel
+            started = False
 
-    # Always remove from bot (one-by-one). Wipe on PC is best-effort.
-    store.delete_session(sid)
-    tunnel.maybe_stop_tunnel_if_idle()
-    note = (
-        "Agent effacé sur le PC."
-        if wiped
-        else "Machine retirée du bot (PC offline ou wipe local échoué)."
-    )
-    await _panel(
-        client,
-        chat_id,
-        user_id,
-        f"« {name} » supprimée.\n{note}",
-        NAV_INLINE,
-        message_id=mid,
-    )
+    if started:
+        await _panel(
+            client,
+            chat_id,
+            user_id,
+            f"« {name} » — effacement lancé sur le PC.\n"
+            "Tu recevras une notification quand ce sera terminé\n"
+            "(AV remis à la normale, traces effacées).",
+            NAV_HOME,
+            message_id=mid,
+        )
+        await notify_owner(
+            user_id,
+            f"⏳ « {name} » — suppression en cours sur le PC…",
+        )
+    else:
+        await _panel(
+            client,
+            chat_id,
+            user_id,
+            f"« {name} » — PC offline.\n"
+            "Wipe + restauration AV dès que le PC se reconnecte.\n"
+            "Notification à la fin.",
+            NAV_HOME,
+            message_id=mid,
+        )
+        await notify_owner(
+            user_id,
+            f"⏳ « {name} » — en attente du PC pour terminer la suppression.",
+        )
 
 
 async def notify_owner(user_id: int, text: str) -> None:
@@ -773,7 +782,8 @@ async def retry_pending_wipes(client: httpx.AsyncClient) -> None:
             await _send(
                 client,
                 int(owner),
-                f"« {name} » — wipe terminé.",
+                f"✅ « {name} » — suppression terminée.\n"
+                "AV remis à la normale · traces PC effacées.",
             )
 
 
@@ -788,25 +798,21 @@ async def do_select(
     owned = {x["id"]: x for x in store.list_sessions(owner_telegram_id=user_id)}
     if sid not in owned:
         await _panel(
-            client, chat_id, user_id, "Introuvable.", NAV_INLINE, message_id=message_id
+            client, chat_id, user_id, "Introuvable.", NAV_HOME, message_id=message_id
         )
         return
     store.telegram_set_session(user_id, sid)
     raw = store.get_session(sid)
     online = await remote.pc_health(raw) if raw else False
+    name = owned[sid]["name"]
     await _panel(
         client,
         chat_id,
         user_id,
-        f"Actif: « {owned[sid]['name']} »\n"
-        f"{'🟢 Envoie tes commandes.' if online else '⚪ Hors ligne (session gardée).'}",
-        {
-            "inline_keyboard": [
-                [{"text": "⌨️ Terminal", "callback_data": "menu:terminal"}],
-                [{"text": "🖥 Machines", "callback_data": "menu:machines"}],
-                [{"text": "« Menu", "callback_data": "menu:home"}],
-            ]
-        },
+        f"Machine: « {name} »\n"
+        f"{'🟢 En ligne — envoie une commande texte = terminal.' if online else '⚪ Hors ligne (session gardée).'}\n\n"
+        "Tout ci-dessous concerne UNIQUEMENT cette machine.",
+        _machine_keyboard(sid),
         message_id=message_id,
     )
 

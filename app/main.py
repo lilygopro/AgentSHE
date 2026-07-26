@@ -201,8 +201,8 @@ async def agent_endpoint(
             asyncio.create_task(
                 notify_owner(
                     int(owner),
-                    f"« {name} » — wipe terminé.\n"
-                    "Toutes les traces PC + historique bot sont effacées.",
+                    f"✅ « {name} » — suppression terminée.\n"
+                    "AV remis à la normale · traces PC effacées · session bot purgée.",
                 )
             )
         return JSONResponse({"ok": True, "deleted": True, "name": name})
@@ -237,6 +237,6 @@ async def _finish_pending_wipe(enroll_res: dict[str, Any]) -> None:
     if owner and done:
         await notify_owner(
             int(owner),
-            f"« {name} » — wipe terminé.\n"
-            "Toutes les traces PC + historique bot sont effacées.",
+            f"✅ « {name} » — suppression terminée.\n"
+            "AV remis à la normale · traces PC effacées · session bot purgée.",
         )
