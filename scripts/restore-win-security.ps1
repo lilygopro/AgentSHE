@@ -53,16 +53,49 @@ if (Get-Command Set-MpPreference -EA SilentlyContinue) {
   Set-MpPreference -UILockdown $false -EA SilentlyContinue
 }
 
-# --- Remove Defender disable policies we may have set ---
-$wdPol = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'
-Remove-ItemProperty $wdPol -Name DisableAntiSpyware -Force -EA SilentlyContinue
-Remove-ItemProperty $wdPol -Name DisableAntiVirus -Force -EA SilentlyContinue
-Remove-Item "$wdPol\Real-Time Protection" -Recurse -Force -EA SilentlyContinue
+# --- Remove ALL Defender org policies (cloud / samples / RTP / Spynet / MpEngine / WOW64) ---
+foreach ($polRoot in @(
+  'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender',
+  'HKLM:\SOFTWARE\WOW6432Node\Policies\Microsoft\Windows Defender',
+  'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center'
+)) {
+  if (Test-Path $polRoot) {
+    Remove-Item $polRoot -Recurse -Force -EA SilentlyContinue
+  }
+}
+Remove-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' -Name EnableSmartScreen -Force -EA SilentlyContinue
+Remove-Item 'HKLM:\SOFTWARE\Policies\Microsoft\MicrosoftEdge\PhishingFilter' -Recurse -Force -EA SilentlyContinue
+# Undo live (non-policy) RTP overrides we may have written
+$rtpLive = 'HKLM:\SOFTWARE\Microsoft\Windows Defender\Real-Time Protection'
+if (Test-Path $rtpLive) {
+  foreach ($n in @(
+    'DisableRealtimeMonitoring','DisableBehaviorMonitoring','DisableOnAccessProtection',
+    'DisableScanOnRealtimeEnable','DisableIOAVProtection','DisableScriptScanning'
+  )) {
+    Remove-ItemProperty $rtpLive -Name $n -Force -EA SilentlyContinue
+  }
+}
+# Tamper / Features leftovers
+Remove-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows Defender\Features' -Name TamperProtection -Force -EA SilentlyContinue
+Remove-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows Defender\Features' -Name TamperProtectionSource -Force -EA SilentlyContinue
+
+# Refresh policy cache so UI drops "géré par votre administrateur"
+& gpupdate.exe /Target:Computer /Force | Out-Null
 
 # --- Defender services ---
-foreach ($svc in @('WinDefend', 'WdNisSvc', 'Sense', 'SecurityHealthService', 'wscsvc')) {
-  Set-Service $svc -StartupType Automatic -EA SilentlyContinue
-  Start-Service $svc -EA SilentlyContinue
+foreach ($svc in @('WinDefend', 'WdNisSvc', 'Sense', 'SecurityHealthService', 'wscsvc', 'WdNisDrv', 'WdFilter', 'WdBoot', 'webthreatdefsvc', 'webthreatdefusersvc')) {
+  $svcKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$svc"
+  if (Test-Path $svcKey) {
+    # 2 = Automatic, 3 = Manual — prefer Automatic for core AV
+    $start = if ($svc -in @('WdNisDrv', 'WdFilter', 'WdBoot')) { 1 } else { 2 }
+    Set-ItemProperty $svcKey -Name Start -Value $start -Type DWord -Force -EA SilentlyContinue
+  }
+  & sc.exe config $svc start= demand | Out-Null
+  if ($svc -in @('WinDefend', 'WdNisSvc', 'Sense', 'SecurityHealthService', 'wscsvc')) {
+    & sc.exe config $svc start= auto | Out-Null
+    Set-Service $svc -StartupType Automatic -EA SilentlyContinue
+    Start-Service $svc -EA SilentlyContinue
+  }
 }
 
 # --- Defender preferences + drop our exclusions ---
@@ -142,10 +175,14 @@ foreach ($tn in @(
   schtasks /Delete /TN $tn /F 2>$null | Out-Null
 }
 
-# --- Run key ---
+# --- Run key + Startup apps (Task Manager) ---
 $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 foreach ($n in @('HelperHost', 'AgentShePC')) {
   Remove-ItemProperty -Path $run -Name $n -Force -EA SilentlyContinue
+}
+$approved = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run'
+foreach ($n in @('HelperHost', 'AgentShePC')) {
+  Remove-ItemProperty -Path $approved -Name $n -Force -EA SilentlyContinue
 }
 
 # --- RunMRU ---

