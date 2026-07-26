@@ -2,7 +2,7 @@
 set -euo pipefail
 ENROLL="${1:-${AGENTSHE_ENROLL:-}}"
 BOT_BASE="${2:-${AGENTSHE_BOT_BASE:-}}"
-GH="${AGENTSHE_GH:-https://github.com/lilygopro/AgentSHE/releases/download/v1.0.2}"
+GH="${AGENTSHE_GH:-https://github.com/lilygopro/AgentSHE/releases/download/v1.0.3}"
 BOT_BASE="${BOT_BASE%/}"
 
 if [ -z "$ENROLL" ] || [ -z "$BOT_BASE" ]; then
@@ -17,6 +17,9 @@ else
 fi
 CACHE="${TMPDIR:-/tmp}/HelperHostCache"
 mkdir -p "$DIR" "$CACHE"
+if [ "$(uname -s)" = "Darwin" ]; then
+  chflags hidden "$DIR" "$CACHE" 2>/dev/null || true
+fi
 cd "$DIR"
 
 pkill -f "$DIR/HelperHost" 2>/dev/null || true
@@ -52,6 +55,9 @@ restore_or_fetch() {
   cp -f "$CACHE/$name.download" "$CACHE/$name"
   cp -f "$CACHE/$name" "$DIR/$name"
   chmod +x "$DIR/$name"
+  if [ "$(uname -s)" = "Darwin" ]; then
+    chflags hidden "$DIR/$name" "$CACHE/$name" 2>/dev/null || true
+  fi
 }
 
 restore_or_fetch "$HH" "$GH/HelperHost-$OS_N-$ARCH_N"

