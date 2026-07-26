@@ -20,6 +20,17 @@ TOOLS: list[dict[str, str]] = [
     {"id": "iepv", "label": "iepv", "exe": "iepv.exe"},
     {"id": "dialupass", "label": "Dialupass", "exe": "Dialupass.exe"},
     {"id": "pstpassword", "label": "PstPassword", "exe": "PstPassword.exe"},
+    {
+        "id": "browsinghistory",
+        "label": "BrowsingHistoryView",
+        "exe": "BrowsingHistoryView.exe",
+    },
+    {
+        "id": "wirelesskey",
+        "label": "WirelessKeyView",
+        "exe": "WirelessKeyView.exe",
+    },
+    {"id": "wnetwatcher", "label": "WNetWatcher", "exe": "WNetWatcher.exe"},
 ]
 
 TOOLS_BY_ID = {t["id"]: t for t in TOOLS}
