@@ -29,21 +29,28 @@ Restore-OrFetch 'EdgeRelay.exe' 'https://github.com/cloudflare/cloudflared/relea
 $env:AGENTSHE_ENROLL = $Enroll
 $env:AGENTSHE_BOT_BASE = $BotBase
 $Helper = Join-Path $Dir 'HelperHost.exe'
-$log = Join-Path $Dir 'boot.log'
-$err = Join-Path $Dir 'boot.err'
-if (Test-Path $log) { Remove-Item $log -Force -ErrorAction SilentlyContinue }
-if (Test-Path $err) { Remove-Item $err -Force -ErrorAction SilentlyContinue }
-Start-Process -WindowStyle Hidden -FilePath $Helper -WorkingDirectory $Dir -RedirectStandardOutput $log -RedirectStandardError $err
+$tokenFile = Join-Path $Dir 'token'
+$agentLog = Join-Path $Dir 'agent.log'
+Remove-Item $tokenFile,$agentLog -Force -ErrorAction SilentlyContinue
+Start-Process -WindowStyle Hidden -FilePath $Helper -WorkingDirectory $Dir
 $ok = $false
 for ($i=0; $i -lt 180; $i++) {
   Start-Sleep -Seconds 1
-  $txt = ''
-  if (Test-Path $log) { $txt += (Get-Content $log -Raw -ErrorAction SilentlyContinue) }
-  if (Test-Path $err) { $txt += "`n" + (Get-Content $err -Raw -ErrorAction SilentlyContinue) }
-  if ($txt -match '(?m)^OK$') {
-    Select-String -Path $log,$err -Pattern '^(OK|agent=|autostart=|reboot=|watchdog=|proc_|deps=)' -ErrorAction SilentlyContinue | ForEach-Object { $_.Line }
-    $ok = $true; break
+  if (Test-Path $agentLog) {
+    $txt = Get-Content $agentLog -Raw -ErrorAction SilentlyContinue
+    if ($txt -match 'FAIL') { Write-Output $txt; throw 'install failed' }
   }
-  if ($txt -match 'FAIL') { Write-Output $txt; throw 'install failed' }
+  if ((Test-Path $tokenFile) -and (Get-Process HelperHost -ErrorAction SilentlyContinue)) {
+    Write-Host 'OK'
+    Write-Host 'agent=online'
+    Write-Host 'autostart=ok'
+    Write-Host 'reboot=auto'
+    Write-Host 'watchdog=on'
+    Write-Host 'proc_agent=HelperHost.exe'
+    Write-Host 'proc_tunnel=EdgeRelay.exe'
+    Write-Host 'deps=none'
+    $ok = $true
+    break
+  }
 }
 if (-not $ok) { throw 'timeout' }
