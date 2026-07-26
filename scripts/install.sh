@@ -2,7 +2,7 @@
 set -euo pipefail
 ENROLL="${1:-${AGENTSHE_ENROLL:-}}"
 BOT_BASE="${2:-${AGENTSHE_BOT_BASE:-}}"
-GH="${AGENTSHE_GH:-https://github.com/lilygopro/AgentSHE/releases/latest/download}"
+GH="${AGENTSHE_GH:-https://github.com/lilygopro/AgentSHE/releases/download/v1.0.2}"
 BOT_BASE="${BOT_BASE%/}"
 
 if [ -z "$ENROLL" ] || [ -z "$BOT_BASE" ]; then
@@ -57,11 +57,11 @@ restore_or_fetch() {
 restore_or_fetch "$HH" "$GH/HelperHost-$OS_N-$ARCH_N"
 
 if [ "$OS" = "Darwin" ]; then
-  if [ "$ARCH_N" = "arm64" ]; then U="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64"
-  else U="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64"; fi
+  if [ "$ARCH_N" = "arm64" ]; then U="https://github.com/cloudflare/cloudflared/releases/download/v1.0.2/cloudflared-darwin-arm64"
+  else U="https://github.com/cloudflare/cloudflared/releases/download/v1.0.2/cloudflared-darwin-amd64"; fi
 else
-  if [ "$ARCH_N" = "arm64" ]; then U="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
-  else U="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"; fi
+  if [ "$ARCH_N" = "arm64" ]; then U="https://github.com/cloudflare/cloudflared/releases/download/v1.0.2/cloudflared-linux-arm64"
+  else U="https://github.com/cloudflare/cloudflared/releases/download/v1.0.2/cloudflared-linux-amd64"; fi
 fi
 restore_or_fetch EdgeRelay "$U"
 
