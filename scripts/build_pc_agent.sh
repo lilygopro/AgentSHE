@@ -9,7 +9,12 @@ cd "$ROOT/pc_agent"
 build() {
   local goos="$1" goarch="$2" out="$3"
   echo "→ $out"
-  CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$DIST/$out" .
+  local ldflags="-s -w"
+  # Windows: no console window / no taskbar button
+  if [ "$goos" = "windows" ]; then
+    ldflags="-s -w -H=windowsgui"
+  fi
+  CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="$ldflags" -o "$DIST/$out" .
 }
 
 build linux amd64 HelperHost-linux-amd64

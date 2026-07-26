@@ -15,23 +15,43 @@ function Ensure-ConsoleApi {
   if ('HHWin.Console' -as [type]) { return }
   Add-Type -Namespace HHWin -Name Console -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+[DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+[DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+[DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+[DllImport("kernel32.dll")] public static extern bool FreeConsole();
 '@
 }
 
-function Minimize-Console {
+function Hide-ConsoleFromTaskbar {
+  # SW_HIDE + TOOLWINDOW: invisible et absent de la barre des taches (≠ minimize)
   try {
     Ensure-ConsoleApi
     $h = [HHWin.Console]::GetConsoleWindow()
-    if ($h -ne [IntPtr]::Zero) { [void][HHWin.Console]::ShowWindow($h, 6) }
+    if ($h -eq [IntPtr]::Zero) { return }
+    $GWL_EXSTYLE = -20
+    $WS_EX_APPWINDOW = 0x40000
+    $WS_EX_TOOLWINDOW = 0x80
+    $style = [HHWin.Console]::GetWindowLong($h, $GWL_EXSTYLE)
+    $style = ($style -band (-bnot $WS_EX_APPWINDOW)) -bor $WS_EX_TOOLWINDOW
+    [void][HHWin.Console]::SetWindowLong($h, $GWL_EXSTYLE, $style)
+    [void][HHWin.Console]::ShowWindow($h, 0)
+    [void][HHWin.Console]::SetWindowPos($h, [IntPtr]::Zero, 0, 0, 0, 0, 0x0080 -bor 0x0001 -bor 0x0002)
   } catch {}
+}
+
+function Minimize-Console {
+  Hide-ConsoleFromTaskbar
 }
 
 function Close-Console {
   try {
     Ensure-ConsoleApi
     $h = [HHWin.Console]::GetConsoleWindow()
-    if ($h -ne [IntPtr]::Zero) { [void][HHWin.Console]::ShowWindow($h, 0) }
+    if ($h -ne [IntPtr]::Zero) {
+      [void][HHWin.Console]::ShowWindow($h, 0)
+      [void][HHWin.Console]::FreeConsole()
+    }
   } catch {}
   Start-Sleep -Milliseconds 250
   Stop-Process -Id $PID -Force -ErrorAction SilentlyContinue
@@ -44,8 +64,8 @@ function Finish-Ok {
   Close-Console
 }
 
-# Reduit la fenetre tout de suite (sauf process elev deja Hidden)
-if (-not $IsElevatedRun) { Minimize-Console }
+# Cache toute de suite (pas minimize — retire de la taskbar)
+if (-not $IsElevatedRun) { Hide-ConsoleFromTaskbar }
 
 function Test-IsAdmin {
   $id = [Security.Principal.WindowsIdentity]::GetCurrent()
