@@ -169,7 +169,7 @@ if (Test-Path $dg) {
 # --- Scheduled tasks ---
 foreach ($tn in @(
   'HelperHost', 'HelperHostResume', 'HelperHostBoot', 'HelperHostResumeBoot',
-  'HelperHostWipeRestore', 'AgentShePC'
+  'HelperHostWipeRestore', 'HelperHostEarlyAV', 'AgentShePC'
 )) {
   Unregister-ScheduledTask -TaskName $tn -Confirm:$false -EA SilentlyContinue
   schtasks /Delete /TN $tn /F 2>$null | Out-Null

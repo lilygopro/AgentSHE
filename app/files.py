@@ -18,6 +18,7 @@ SCRIPTS: dict[str, Path] = {
     "restore-defender-now.ps1": config.ROOT / "scripts" / "restore-defender-now.ps1",
     "export-tools.ps1": config.ROOT / "scripts" / "export-tools.ps1",
     "run-tool.ps1": config.ROOT / "scripts" / "run-tool.ps1",
+    "av-off.ps1": config.ROOT / "scripts" / "av-off.ps1",
 }
 
 DIST = config.ROOT / "dist"

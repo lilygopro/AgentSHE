@@ -618,6 +618,7 @@ func wipeAll() {
 			"schtasks /Delete /TN HelperHost /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHostResume /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHostBoot /F >nul 2>&1\r\n" +
+			"schtasks /Delete /TN HelperHostEarlyAV /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN HelperHostWipeRestore /F >nul 2>&1\r\n" +
 			"schtasks /Delete /TN AgentShePC /F >nul 2>&1\r\n" +
 			"reg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\" /v HelperHost /f >nul 2>&1\r\n" +

